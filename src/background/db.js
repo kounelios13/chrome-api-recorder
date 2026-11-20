@@ -120,6 +120,67 @@ export async function getBody(id) {
 }
 
 /**
+ * Replace an entry's response body and refresh its metadata in one
+ * transaction. The first edit keeps a copy of the original body so the user can
+ * restore the recorded payload later.
+ *
+ * @param {object} entry updated metadata (same id)
+ * @param {string} bodyBase64 new response body
+ * @param {{preserveOriginal?: boolean}} [options]
+ * @returns {Promise<{hasOriginal: boolean}>}
+ */
+export async function updateEntryBody(entry, bodyBase64, { preserveOriginal = true } = {}) {
+  const database = await openDb();
+  const transaction = database.transaction([DB.ENTRIES, DB.BODIES], 'readwrite');
+  const bodyStore = transaction.objectStore(DB.BODIES);
+  const entryStore = transaction.objectStore(DB.ENTRIES);
+
+  let hasOriginal = false;
+  const request = bodyStore.get(entry.id);
+  request.onsuccess = () => {
+    const record = request.result ?? { id: entry.id, body: '' };
+    if (preserveOriginal && typeof record.originalBody !== 'string') {
+      record.originalBody = typeof record.body === 'string' ? record.body : '';
+    }
+    record.id = entry.id;
+    record.body = bodyBase64;
+    hasOriginal = typeof record.originalBody === 'string';
+    bodyStore.put(record);
+    entryStore.put(entry);
+  };
+
+  await transactionDone(transaction);
+  return { hasOriginal };
+}
+
+/**
+ * Restore the original (recorded) body of an entry, discarding the edit.
+ * @param {object} entry updated metadata (same id)
+ * @returns {Promise<boolean>} false when there is no original to restore
+ */
+export async function restoreEntryBody(entry) {
+  const database = await openDb();
+  const transaction = database.transaction([DB.ENTRIES, DB.BODIES], 'readwrite');
+  const bodyStore = transaction.objectStore(DB.BODIES);
+  const entryStore = transaction.objectStore(DB.ENTRIES);
+
+  let restored = false;
+  const request = bodyStore.get(entry.id);
+  request.onsuccess = () => {
+    const record = request.result;
+    if (!record || typeof record.originalBody !== 'string') return;
+    record.body = record.originalBody;
+    delete record.originalBody;
+    bodyStore.put(record);
+    entryStore.put(entry);
+    restored = true;
+  };
+
+  await transactionDone(transaction);
+  return restored;
+}
+
+/**
  * All metadata for one scenario (bodies are not loaded).
  * @param {string} scenarioId
  * @returns {Promise<object[]>}

@@ -19,6 +19,9 @@
  *  scenario.rename        {id, name} -> {scenario}
  *  scenario.delete        {id} -> {scenarios}
  *  scenario.entries       {scenarioId, limit?} -> {entries}
+ *  scenario.entry.get     {scenarioId, entryId} -> {entry, payload, editable, hasOriginal}
+ *  scenario.entry.update  {scenarioId, entryId, bodyText} -> {entry, hasOriginal}
+ *                         {scenarioId, entryId, restoreOriginal:true} -> {entry, hasOriginal}
  *  settings.set           {settings} -> {settings}
  *  sites.add              {pattern} -> {sites}
  *  sites.remove           {pattern} -> {sites}

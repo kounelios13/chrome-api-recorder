@@ -18,7 +18,7 @@ const MAX_MB = 200;
 const DELETE_CONFIRM_MS = 5000;
 const STATUS_TIMEOUT_MS = 4000;
 const SAVED_TIMEOUT_MS = 2400;
-const ENTRIES_LIMIT = 50;
+const ENTRIES_LIMIT = 200;
 const PREVIEW_CHARS = 240;
 const ALL_SITES_PATTERN = '*://*/*';
 
@@ -39,6 +39,13 @@ const state = {
   pendingDeleteId: null,
   deleteTimer: 0,
   entriesScenarioId: null,
+  /** @type {Scenario|null} */
+  entriesScenario: null,
+  /** @type {any[]} */
+  entries: [],
+  entriesTotal: 0,
+  /** @type {null|{scenarioId:string, entry:any, payload:any, editable:boolean, hasOriginal:boolean}} */
+  editing: null,
   statusTimer: 0,
   savedTimer: 0,
   unsubscribe: null,
@@ -162,6 +169,20 @@ function cacheDom() {
     'entries-body',
     'entries-empty',
     'footer-version',
+    'entry-editor',
+    'entry-editor-form',
+    'entry-editor-title',
+    'entry-editor-meta',
+    'entry-editor-request',
+    'entry-editor-note',
+    'entry-editor-hint',
+    'entry-editor-error',
+    'entry-editor-close',
+    'entry-editor-cancel',
+    'entry-editor-format',
+    'entry-editor-restore',
+    'entry-editor-save',
+    'payload-editor',
   ];
   for (const id of ids) {
     const element = document.getElementById(id);
@@ -182,6 +203,20 @@ function wireEvents() {
   dom.settingsForm.addEventListener('submit', onSaveSettings);
   dom.resetSettings.addEventListener('click', onResetSettings);
   dom.entriesClose.addEventListener('click', closeEntries);
+
+  dom.entryEditorForm.addEventListener('submit', onSavePayload);
+  dom.entryEditorClose.addEventListener('click', closeEditor);
+  dom.entryEditorCancel.addEventListener('click', closeEditor);
+  dom.entryEditorRestore.addEventListener('click', onRestorePayload);
+  dom.entryEditorFormat.addEventListener('click', onFormatPayload);
+  dom.payloadEditor.addEventListener('input', updateEditorHint);
+  dom.entryEditor.addEventListener('close', () => {
+    state.editing = null;
+    hideFieldError(dom.entryEditorError);
+  });
+  dom.entryEditor.addEventListener('click', (event) => {
+    if (event.target === dom.entryEditor) closeEditor();
+  });
 }
 
 function cleanup() {
@@ -538,6 +573,7 @@ function renderScenarioRow(scenario) {
       type: 'button',
       'aria-expanded': String(isViewing),
       'aria-label': `View requests for scenario ${scenario.name}`,
+      'data-testid': `view-entries-${scenario.id}`,
     },
     isViewing ? 'Hide requests' : 'View requests',
   );
@@ -769,6 +805,9 @@ async function viewEntries(scenario, button) {
  * @param {number} total
  */
 function renderEntries(scenario, entries, total) {
+  state.entriesScenario = scenario;
+  state.entries = entries;
+  state.entriesTotal = total;
   dom.entriesTitle.textContent = `Requests in “${scenario.name}” — ${entries.length} of ${total}`;
   dom.entriesBody.replaceChildren();
   dom.entriesEmpty.hidden = entries.length > 0;
@@ -796,21 +835,47 @@ function renderEntryRow(entry) {
   const preview = truncateText(entry?.responsePreview);
   const size = formatBytes(entry?.size);
   const captured = formatTimestamp(entry?.capturedAt);
+  const edited = entry?.edited === true;
+  const editedTitle = edited
+    ? `Payload edited ${formatTimestamp(entry?.editedAt)} (original kept for restore)`
+    : '';
+
+  const methodCell = el('td', { class: 'entry-method' }, method);
+  if (edited) {
+    methodCell.append(el('span', { class: 'entry-edited-badge', title: editedTitle }, 'edited'));
+  }
+
+  const editButton = el(
+    'button',
+    {
+      class: 'btn btn-ghost btn-sm',
+      type: 'button',
+      'data-testid': `edit-entry-${entry.id}`,
+      'aria-label': `Edit payload for ${method} ${url || entry?.url || ''}`,
+      title: edited ? editedTitle : 'Edit the recorded response payload',
+    },
+    edited ? 'Edit' : 'Edit',
+  );
+  editButton.addEventListener('click', () => openEntryEditor(entry.id, editButton));
 
   return el(
     'tr',
-    {},
-    el('td', { class: 'entry-method' }, method),
+    edited ? { class: 'entry-row-edited' } : {},
+    methodCell,
     el('td', { class: `entry-status entry-status-${statusClass}` }, statusText),
     el('td', { class: 'entry-url', title: String(entry?.url ?? '') }, url || '—'),
     el('td', { class: 'entry-size' }, size),
     el('td', { class: 'entry-time' }, captured),
     el('td', { class: 'entry-preview', title: preview }, preview || '—'),
+    el('td', { class: 'entry-actions' }, editButton),
   );
 }
 
 function closeEntries() {
   state.entriesScenarioId = null;
+  state.entriesScenario = null;
+  state.entries = [];
+  state.entriesTotal = 0;
   dom.entriesPanel.hidden = true;
   dom.entriesBody.replaceChildren();
   dom.entriesEmpty.hidden = true;
@@ -860,6 +925,195 @@ function formatTimestamp(value) {
     });
   } catch {
     return '—';
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Recorded payload editor                                             */
+/* ------------------------------------------------------------------ */
+
+/** @param {any} updatedEntry */
+function applyEntryUpdate(updatedEntry) {
+  if (!updatedEntry?.id || !state.entriesScenario) return;
+  state.entries = state.entries.map((entry) =>
+    entry.id === updatedEntry.id ? { ...entry, ...updatedEntry } : entry,
+  );
+  renderEntries(state.entriesScenario, state.entries, state.entriesTotal);
+}
+
+/**
+ * @param {string} entryId
+ * @param {HTMLButtonElement} button
+ */
+async function openEntryEditor(entryId, button) {
+  if (!state.entriesScenarioId) return;
+  hideError();
+  hideFieldError(dom.entryEditorError);
+  setBusy(button, true);
+  try {
+    const response = await send(MSG.ENTRY_GET, { scenarioId: state.entriesScenarioId, entryId });
+    const entry = response?.entry;
+    const payload = response?.payload;
+    if (!entry || !payload) throw new Error('Could not load that recorded request.');
+
+    if (dom.entryEditor.open) dom.entryEditor.close();
+    state.editing = {
+      scenarioId: state.entriesScenarioId,
+      entry,
+      payload,
+      editable: response.editable === true && payload.kind === 'text',
+      hasOriginal: response.hasOriginal === true,
+    };
+    renderEditor();
+    dom.entryEditor.showModal();
+    if (state.editing.editable) {
+      queueMicrotask(() => {
+        if (!state.editing) return;
+        dom.payloadEditor.focus();
+        dom.payloadEditor.setSelectionRange(0, 0);
+      });
+    }
+  } catch (error) {
+    showError(errorMessage(error, 'Could not load the recorded payload.'));
+  } finally {
+    if (button.isConnected) setBusy(button, false);
+  }
+}
+
+function renderEditor() {
+  const editing = state.editing;
+  if (!editing) return;
+
+  const { entry, payload, editable, hasOriginal } = editing;
+  const status = Number(entry.status);
+  const statusLabel = Number.isFinite(status) && status > 0
+    ? `${Math.trunc(status)}${entry.statusText ? ` ${entry.statusText}` : ''}`
+    : 'no status';
+
+  dom.entryEditorMeta.textContent = [
+    `${String(entry.method || 'GET').toUpperCase()} ${statusLabel}`,
+    entry.mimeType || 'unknown content-type',
+    formatBytes(entry.size),
+    entry.edited ? 'edited' : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  dom.entryEditorRequest.textContent = String(entry.url || '');
+  dom.entryEditorRequest.title = String(entry.url || '');
+
+  dom.entryEditorNote.hidden = editable;
+  if (!editable) {
+    dom.entryEditorNote.dataset.tone = 'warn';
+    dom.entryEditorNote.textContent =
+      'This response is binary, so it cannot be edited as text. You can restore the original payload if one is available.';
+  } else {
+    dom.entryEditorNote.textContent = '';
+    delete dom.entryEditorNote.dataset.tone;
+  }
+
+  dom.payloadEditor.value = editable ? String(payload.text ?? '') : '';
+  dom.payloadEditor.disabled = !editable;
+  dom.entryEditorSave.disabled = !editable;
+  dom.entryEditorFormat.disabled = !editable;
+  dom.entryEditorRestore.hidden = !hasOriginal;
+  hideFieldError(dom.entryEditorError);
+  updateEditorHint();
+}
+
+function updateEditorHint() {
+  const editing = state.editing;
+  if (!editing) return;
+
+  const text = dom.payloadEditor.value;
+  const bytes = new TextEncoder().encode(text).length;
+  const limit = Number(state.settings.maxBodyBytes) || DEFAULT_SETTINGS.maxBodyBytes;
+  const parts = [`${bytes.toLocaleString()} bytes`];
+  let tone = '';
+
+  const expectsJson = /json/i.test(String(editing.entry.mimeType || '')) || /^\s*[[{]/.test(text);
+  if (expectsJson && text.trim()) {
+    try {
+      JSON.parse(text);
+      parts.push('valid JSON');
+    } catch {
+      parts.push('not valid JSON — it will still be saved as typed');
+      tone = 'warn';
+    }
+  }
+  if (bytes > limit) {
+    parts.push(`over the ${formatBytes(limit)} limit`);
+    tone = 'warn';
+  }
+
+  dom.entryEditorHint.textContent = parts.join(' · ');
+  if (tone) dom.entryEditorHint.dataset.tone = tone;
+  else dom.entryEditorHint.removeAttribute('data-tone');
+}
+
+function closeEditor() {
+  state.editing = null;
+  hideFieldError(dom.entryEditorError);
+  if (dom.entryEditor.open) dom.entryEditor.close();
+  else dom.entryEditor.removeAttribute('open');
+}
+
+/** @param {Event} event */
+async function onSavePayload(event) {
+  event.preventDefault();
+  const editing = state.editing;
+  if (!editing || !editing.editable) return;
+
+  hideError();
+  hideFieldError(dom.entryEditorError);
+  setBusy(dom.entryEditorSave, true);
+  try {
+    const response = await send(MSG.ENTRY_UPDATE, {
+      scenarioId: editing.scenarioId,
+      entryId: editing.entry.id,
+      bodyText: dom.payloadEditor.value,
+    });
+    const updated = response?.entry;
+    applyEntryUpdate(updated);
+    closeEditor();
+    showStatus('Recorded payload saved. Replay will use the edited payload.');
+  } catch (error) {
+    showFieldError(dom.entryEditorError, errorMessage(error, 'Could not save the payload.'));
+  } finally {
+    setBusy(dom.entryEditorSave, false);
+  }
+}
+
+async function onRestorePayload() {
+  const editing = state.editing;
+  if (!editing) return;
+
+  hideError();
+  hideFieldError(dom.entryEditorError);
+  setBusy(dom.entryEditorRestore, true);
+  try {
+    const response = await send(MSG.ENTRY_UPDATE, {
+      scenarioId: editing.scenarioId,
+      entryId: editing.entry.id,
+      restoreOriginal: true,
+    });
+    applyEntryUpdate(response?.entry);
+    closeEditor();
+    showStatus('Original recorded payload restored.');
+  } catch (error) {
+    showFieldError(dom.entryEditorError, errorMessage(error, 'Could not restore the original payload.'));
+  } finally {
+    setBusy(dom.entryEditorRestore, false);
+  }
+}
+
+function onFormatPayload() {
+  if (!state.editing?.editable) return;
+  try {
+    dom.payloadEditor.value = JSON.stringify(JSON.parse(dom.payloadEditor.value), null, 2);
+    hideFieldError(dom.entryEditorError);
+    updateEditorHint();
+  } catch {
+    showFieldError(dom.entryEditorError, 'The payload is not valid JSON, so it cannot be formatted.');
   }
 }
 

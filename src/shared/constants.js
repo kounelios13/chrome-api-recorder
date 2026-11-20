@@ -17,6 +17,8 @@ export const MSG = Object.freeze({
   SCENARIO_RENAME: 'scenario.rename',
   SCENARIO_DELETE: 'scenario.delete',
   SCENARIO_ENTRIES: 'scenario.entries',
+  ENTRY_GET: 'scenario.entry.get',
+  ENTRY_UPDATE: 'scenario.entry.update',
   SETTINGS_SET: 'settings.set',
   SITES_ADD: 'sites.add',
   SITES_REMOVE: 'sites.remove',

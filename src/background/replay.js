@@ -74,6 +74,30 @@ export async function startReplay({ tabId, scenarioId, session, settings, hooks 
 }
 
 /**
+ * Reload the match index and clear cached bodies for every active replay of a
+ * scenario. Called after a recorded payload is edited or restored so the next
+ * intercepted request serves the new bytes (even mid-session).
+ * @param {string} scenarioId
+ * @returns {Promise<boolean>} whether any active replay was refreshed
+ */
+export async function refreshScenario(scenarioId) {
+  const entries = await db.listEntries(scenarioId);
+  const index = new Map();
+  for (const entry of entries) {
+    if (entry && typeof entry.matchKey === 'string') index.set(entry.matchKey, entry);
+  }
+
+  let refreshed = false;
+  for (const state of replayers.values()) {
+    if (state.scenarioId !== scenarioId) continue;
+    state.index = index;
+    state.bodyCache.clear();
+    refreshed = true;
+  }
+  return refreshed;
+}
+
+/**
  * Toggle between replay and live passthrough without losing the scenario.
  * @param {number} tabId
  * @param {boolean} live

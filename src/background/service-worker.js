@@ -4,7 +4,9 @@
  * Owns the message API for the popup, options page and the in-page HUD, wires
  * Chrome events to the engines and recovers sessions after a restart.
  */
-import { MSG } from '../shared/constants.js';
+import { LIMITS, MSG } from '../shared/constants.js';
+import { base64ToBytes, bytesToBase64, bytesToUtf8, looksLikeText, utf8ToBytes } from '../shared/bytes.js';
+import { buildEditedEntry, summarizeEntry } from '../shared/entryBody.js';
 import { isHttpUrl } from '../shared/url.js';
 import { patternForTabUrl } from '../shared/patterns.js';
 import { newScenario, normalizeScenarioName } from '../shared/scenarios.js';
@@ -172,21 +174,67 @@ async function dispatch(message, sender) {
       entries.sort((left, right) => (right.capturedAt ?? 0) - (left.capturedAt ?? 0));
       return {
         ok: true,
-        entries: entries.slice(0, limit).map((entry) => ({
-          id: entry.id,
-          method: entry.method,
-          url: entry.url,
-          status: entry.status,
-          statusText: entry.statusText,
-          capturedAt: entry.capturedAt,
-          size: entry.size,
-          mimeType: entry.mimeType,
-          resourceType: entry.resourceType,
-          requestPreview: entry.requestPreview,
-          responsePreview: entry.responsePreview,
-        })),
+        entries: entries.slice(0, limit).map((entry) => summarizeEntry(entry)),
         total: entries.length,
       };
+    }
+
+    case MSG.ENTRY_GET: {
+      const { scenarioId, entryId } = requireEntryIds(message);
+      const entry = await findRecordedEntry(scenarioId, entryId);
+      const bodyRecord = await db.getBody(entryId);
+      if (!bodyRecord) throw new Error('The response body for this request is missing from storage.');
+
+      const bytes = base64ToBytes(bodyRecord.body);
+      const editable = looksLikeText(bytes);
+      const payload = editable
+        ? { kind: 'text', text: bytesToUtf8(bytes), size: bytes.length }
+        : { kind: 'binary', base64: bodyRecord.body, size: bytes.length };
+
+      return {
+        ok: true,
+        entry: summarizeEntry(entry),
+        payload,
+        editable,
+        hasOriginal: typeof bodyRecord.originalBody === 'string',
+      };
+    }
+
+    case MSG.ENTRY_UPDATE: {
+      const { scenarioId, entryId } = requireEntryIds(message);
+      const entry = await findRecordedEntry(scenarioId, entryId);
+
+      if (message.restoreOriginal) {
+        const bodyRecord = await db.getBody(entryId);
+        if (!bodyRecord || typeof bodyRecord.originalBody !== 'string') {
+          throw new Error('There is no original payload to restore for this request.');
+        }
+
+        const bytes = base64ToBytes(bodyRecord.originalBody);
+        const restoredEntry = buildEditedEntry(entry, bytes, { edited: false });
+        const restored = await db.restoreEntryBody(restoredEntry);
+        if (!restored) throw new Error('The original payload could not be restored. Try again.');
+
+        await sessions.refreshScenarioData(scenarioId);
+        return { ok: true, entry: summarizeEntry(restoredEntry), hasOriginal: false };
+      }
+
+      if (typeof message.bodyText !== 'string') throw new Error('The payload must be text.');
+
+      const settings = await store.getSettings();
+      const bytes = utf8ToBytes(message.bodyText);
+      if (bytes.length > settings.maxBodyBytes) {
+        throw new Error(
+          `This payload is ${formatBytes(bytes.length)}, above the ${formatBytes(settings.maxBodyBytes)} limit. Raise “Max response size” in Settings first.`,
+        );
+      }
+
+      const editedEntry = buildEditedEntry(entry, bytes, { edited: true });
+      const { hasOriginal } = await db.updateEntryBody(editedEntry, bytesToBase64(bytes), {
+        preserveOriginal: true,
+      });
+      await sessions.refreshScenarioData(scenarioId);
+      return { ok: true, entry: summarizeEntry(editedEntry), hasOriginal };
     }
 
     case MSG.SETTINGS_SET: {
@@ -229,6 +277,36 @@ function requireTabId(message, sender) {
 function requireString(value, message) {
   if (typeof value !== 'string' || value.trim() === '') throw new Error(message);
   return value;
+}
+
+/**
+ * @param {any} message
+ * @returns {{scenarioId: string, entryId: string}}
+ */
+function requireEntryIds(message) {
+  return {
+    scenarioId: requireString(message?.scenarioId, 'Missing scenario id.'),
+    entryId: requireString(message?.entryId, 'Missing recorded request id.'),
+  };
+}
+
+/**
+ * @param {string} scenarioId
+ * @param {string} entryId
+ */
+async function findRecordedEntry(scenarioId, entryId) {
+  const entry = await db.getEntry(entryId);
+  if (!entry || entry.scenarioId !== scenarioId) {
+    throw new Error('That recorded request was not found. Refresh the request list and try again.');
+  }
+  return entry;
+}
+
+/** @param {number} bytes */
+function formatBytes(bytes) {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
 }
 
 /**

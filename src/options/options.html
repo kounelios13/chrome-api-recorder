@@ -50,6 +50,10 @@
             </li>
             <li>GraphQL-looking requests (URL or body) are skipped and always hit the real network.</li>
             <li>Recording and replay run <strong>only on the sites listed below</strong>.</li>
+            <li>
+              Recorded payloads can be <strong>edited per request</strong> from the Scenarios section; the
+              original body is kept so you can restore it.
+            </li>
             <li><strong>Live mode</strong> sends every request to the real network without touching recordings.</li>
             <li>Sessions are <strong>per tab</strong>. One tab can record while another replays.</li>
           </ul>
@@ -179,6 +183,7 @@
                     <th scope="col">Size</th>
                     <th scope="col">Captured</th>
                     <th scope="col">Response preview</th>
+                    <th scope="col">Actions</th>
                   </tr>
                 </thead>
                 <tbody id="entries-body"></tbody>
@@ -208,6 +213,10 @@
               Recording is skipped for request bodies that are too large to key reliably, and for responses above the size
               limit set in Settings.
             </li>
+            <li>
+              <strong>Only text payloads can be edited.</strong> Binary responses are read-only in the editor. Edits are stored
+              locally and replay immediately; <em>Restore original</em> brings back the recorded bytes.
+            </li>
           </ul>
         </section>
       </main>
@@ -217,6 +226,61 @@
         <span class="footer-meta">Sessions are per tab. Shortcuts: popup from the toolbar.</span>
       </footer>
     </div>
+
+    <dialog id="entry-editor" class="modal" data-testid="entry-editor" aria-labelledby="entry-editor-title">
+      <form id="entry-editor-form" class="modal-card" novalidate>
+        <div class="modal-head">
+          <div class="modal-head-copy">
+            <h2 id="entry-editor-title" class="modal-title">Edit recorded payload</h2>
+            <p id="entry-editor-meta" class="modal-meta" data-testid="entry-editor-meta"></p>
+          </div>
+          <button
+            id="entry-editor-close"
+            class="btn btn-ghost btn-sm"
+            type="button"
+            aria-label="Close payload editor"
+          >
+            Close
+          </button>
+        </div>
+
+        <p id="entry-editor-request" class="modal-request" data-testid="entry-editor-request"></p>
+        <p id="entry-editor-note" class="modal-note" hidden></p>
+
+        <label class="field-label" for="payload-editor">Response payload</label>
+        <textarea
+          id="payload-editor"
+          class="payload-editor"
+          data-testid="payload-editor"
+          rows="16"
+          spellcheck="false"
+          autocomplete="off"
+          aria-describedby="entry-editor-hint"
+        ></textarea>
+        <p id="entry-editor-hint" class="modal-hint" data-testid="payload-size-hint"></p>
+        <p id="entry-editor-error" class="field-error" role="alert" hidden></p>
+
+        <div class="modal-actions">
+          <button id="entry-editor-format" class="btn btn-ghost btn-sm" type="button" data-testid="format-payload">
+            Format JSON
+          </button>
+          <button
+            id="entry-editor-restore"
+            class="btn btn-secondary btn-sm"
+            type="button"
+            data-testid="restore-payload"
+            hidden
+          >
+            Restore original
+          </button>
+          <span class="modal-spacer" aria-hidden="true"></span>
+          <button id="entry-editor-cancel" class="btn btn-ghost" type="button">Cancel</button>
+          <button id="entry-editor-save" class="btn btn-primary" type="submit" data-testid="save-payload">
+            Save payload
+          </button>
+        </div>
+      </form>
+    </dialog>
 
     <script type="module" src="options.js"></script>
   </body>

@@ -19,6 +19,12 @@ fulfills requests at the network layer, so no page-side monkey-patching is invol
 - **Transparent replay** — while a scenario replays, matching requests are answered with the stored
   status/headers/body exactly as the server would have answered. Non-matching requests pass through
   live, so the app keeps working.
+- **Editable payloads** — in Settings → Scenarios → *View requests*, every recorded request has an
+  **Edit** button that opens the response payload in a dialog. Edit and save it to test different
+  response shapes; the original payload is kept and can be restored with one click. Replay picks up
+  edits immediately, even while a replay session is active.
+
+  ![Payload editor dialog](docs/payload-editor.png)
 - **Per-tab sessions** — a tab can record while another tab replays. A session survives page reloads
   on allowlisted sites and is bound to the tab it was started in.
 - **Live mode** — one click disables replay interception on that tab; every request goes to the real
@@ -55,6 +61,9 @@ per site, the first time you add it.
 5. Select the scenario and press **Start replay**, then reload/interact with the page. Matching
    requests are served from the recording (no server hit); everything else goes live.
 6. Press **Go live** in the HUD (or popup) to bypass the recording, and **Resume replay** to return.
+7. To test a different response, open **Settings → Scenarios → View requests**, press **Edit** next
+   to a request, change the payload and press **Save payload**. Replay now serves the edited body;
+   **Restore original** brings the recorded body back.
 
 ## How it works
 
@@ -70,6 +79,10 @@ per site, the first time you add it.
   is not replayed by default (toggle in Settings).
 - **Live mode** disables the `Fetch` domain, leaving the debugger attached, so toggling back is
   instant.
+- **Payload editing** rewrites the stored response body in IndexedDB (the first edit keeps a copy of
+  the original body) and refreshes the match index/cache of active replay sessions for that scenario,
+  so the next intercepted request gets the new bytes. Status and response headers stay unchanged;
+  the browser recalculates `content-length` when fulfilling.
 - **Per-tab sessions** are tracked in the service worker and snapshotted to `chrome.storage.session`,
   so a restarted service worker can reattach and recover. A keepalive ping from the in-page HUD keeps
   the MV3 worker alive while a session is active.
@@ -90,7 +103,8 @@ src/
   content/overlay.js   in-page HUD (shadow DOM)
   popup/               toolbar popup: scenario management, record/replay/live, enable site
   options/             settings page: sites, settings, scenario management
-  shared/              pure helpers: match keys, URL normalization, headers, patterns, messages
+  shared/              pure helpers: match keys, URL normalization, headers, patterns, entry bodies,
+                       messages
 test/unit/             Node test runner tests for the pure logic
 test/e2e/              real Chrome for Testing end-to-end suite
 ```
@@ -126,6 +140,10 @@ uploaded anywhere. Deleting a scenario permanently removes its recorded data.
   headers are replayed so the actual request/response works offline from the recording.
 - Navigating a recording/replay tab to a site that is not allowlisted stops the session (recorded
   data is kept). The same happens if the page is closed or DevTools/replaced debugger detaches.
+- Binary response bodies cannot be edited as text (the dialog explains this); text formats such as
+  JSON, XML, HTML and plain text are fully editable. Edits are written byte-for-byte and are not
+  JSON-validated, so you can intentionally test malformed payloads (the dialog warns about invalid
+  JSON but still lets you save).
 - Chrome match patterns ignore ports: adding `localhost:3000` allowlists every port on `localhost`.
 - `start`/`stop` are per tab. One active session per tab; switching modes stops the previous one.
 
@@ -145,7 +163,9 @@ local fixture server and asserts, among others: only XHR/fetch is recorded, two 
 same endpoint are stored separately, replayed responses are served from storage while the server
 version is bumped to prove no network hit, GraphQL and images stay live, Live mode hits the server,
 unrecorded requests pass through, replay can be resumed, counters/badges are correct, and the popup
-and options pages load without uncaught errors (44 checks).
+and options pages load without uncaught errors. The payload editor is exercised through the real
+Settings UI: the recorded response is edited, replay serves the edited bytes, the original is restored
+from the dialog, and the next replay serves the original again (55 checks).
 
 ## License
 

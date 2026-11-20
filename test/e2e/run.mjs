@@ -233,6 +233,63 @@ async function setExtensionStorage(client, extensionSession, values) {
   );
 }
 
+/** @param {import('./cdp-client.mjs').CdpClient} client @param {string} sessionId */
+async function reloadExtensionPage(client, sessionId) {
+  await client.send('Page.reload', {}, sessionId).catch(() => {});
+  await waitForValue(
+    client,
+    sessionId,
+    'typeof chrome !== "undefined" && !!chrome.runtime && !!chrome.runtime.id',
+    'the options page',
+  );
+  await sleep(150);
+}
+
+/**
+ * @param {import('./cdp-client.mjs').CdpClient} client
+ * @param {string} sessionId
+ * @param {string} selector
+ */
+async function clickInPage(client, sessionId, selector) {
+  const clicked = await evaluate(
+    client,
+    sessionId,
+    `(() => {
+      const target = document.querySelector(${JSON.stringify(selector)});
+      if (!target) return false;
+      target.click();
+      return true;
+    })()`,
+  );
+  if (!clicked) throw new Error(`Could not click ${selector}`);
+}
+
+/** @param {import('./cdp-client.mjs').CdpClient} client @param {string} sessionId */
+async function waitForDialogOpen(client, sessionId) {
+  await waitForValue(
+    client,
+    sessionId,
+    `(() => {
+      const dialog = document.querySelector('[data-testid="entry-editor"]');
+      return Boolean(dialog && dialog.open);
+    })()`,
+    'the payload editor to open',
+  );
+}
+
+/** @param {import('./cdp-client.mjs').CdpClient} client @param {string} sessionId */
+async function waitForDialogClosed(client, sessionId) {
+  await waitForValue(
+    client,
+    sessionId,
+    `(() => {
+      const dialog = document.querySelector('[data-testid="entry-editor"]');
+      return Boolean(dialog && !dialog.open);
+    })()`,
+    'the payload editor to close',
+  );
+}
+
 /**
  * Run a function in the fixture page's MAIN world through chrome.scripting.
  * Using the extension API (instead of a second CDP debugger session) keeps the
@@ -564,17 +621,123 @@ async function main() {
       requestPreviews,
     );
 
+    const greetingEntry = entries.find((entry) => new URL(entry.url).pathname === '/api/greeting');
+    check('greeting entry is available for editing', Boolean(greetingEntry?.id));
+
     await extensionCall(client, extensionSession, 'session.stop', { tabId });
     const afterStop = await extensionCall(client, extensionSession, 'session.get', { tabId });
     check('recording stops cleanly', afterStop?.ok === true && afterStop.session === null, JSON.stringify(afterStop));
 
-    // ---- Replay proof: bump the server version, replay must still serve v1.
+    // ---- Payload editor: edit a recorded response through the Settings UI.
+    await reloadExtensionPage(client, extensionSession);
+    await waitForValue(
+      client,
+      extensionSession,
+      `Boolean(document.querySelector('[data-testid="view-entries-${scenarioId}"]'))`,
+      'the scenario list on the settings page',
+    );
+    await clickInPage(client, extensionSession, `[data-testid="view-entries-${scenarioId}"]`);
+    await waitForValue(
+      client,
+      extensionSession,
+      `Boolean(document.querySelector('[data-testid="edit-entry-${greetingEntry.id}"]'))`,
+      'the recorded request list with edit buttons',
+    );
+    await clickInPage(client, extensionSession, `[data-testid="edit-entry-${greetingEntry.id}"]`);
+    await waitForDialogOpen(client, extensionSession);
+    if (process.env.E2E_SCREENSHOT) {
+      const screenshot = await client.send('Page.captureScreenshot', { format: 'png' }, extensionSession);
+      writeFileSync(process.env.E2E_SCREENSHOT, Buffer.from(screenshot.data, 'base64'));
+    }
+    const originalEditorText = await evaluate(
+      client,
+      extensionSession,
+      `document.querySelector('[data-testid="payload-editor"]').value`,
+    );
+    check(
+      'payload editor opens with the recorded response body',
+      typeof originalEditorText === 'string' && originalEditorText.includes('hello-v1'),
+      String(originalEditorText).slice(0, 140),
+    );
+
+    const editedPayload = JSON.stringify({ message: 'edited-by-ui', version: 'edited' });
+    await evaluate(
+      client,
+      extensionSession,
+      `(() => {
+        const editor = document.querySelector('[data-testid="payload-editor"]');
+        editor.value = ${JSON.stringify(editedPayload)};
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`,
+    );
+    await clickInPage(client, extensionSession, '[data-testid="save-payload"]');
+    await waitForDialogClosed(client, extensionSession);
+
+    const editedEntryResponse = await extensionCall(client, extensionSession, 'scenario.entry.get', {
+      scenarioId,
+      entryId: greetingEntry.id,
+    });
+    check(
+      'Settings UI saves the edited payload and flags the request as edited',
+      String(editedEntryResponse?.payload?.text ?? '').includes('edited-by-ui') &&
+        editedEntryResponse?.entry?.edited === true,
+      JSON.stringify({ payload: editedEntryResponse?.payload?.text, edited: editedEntryResponse?.entry?.edited }),
+    );
+
+    // ---- Replay proof: the edited payload is served, then the original is restored.
     const hitsBeforeReplay = { ...server.state.hits };
     server.state.version = 'v2';
 
     const replaying = await extensionCall(client, extensionSession, 'session.startReplay', { tabId, scenarioId });
     check('replay started', replaying?.ok === true && replaying.session?.mode === 'replay', replaying?.error);
 
+    // First replayed page run must serve the payload edited in Settings.
+    await reloadFixturePage(client, extensionSession, tabId);
+    const editedRun = await waitForPageRun(client, extensionSession, tabId, 'the page run with the edited payload');
+    check('edited payload run had no page errors', editedRun.errors.length === 0, editedRun.errors.join('; '));
+    check(
+      'replay serves the payload edited in Settings',
+      editedRun.results.greeting?.body?.version === 'edited' &&
+        editedRun.results.greeting?.body?.message === 'edited-by-ui',
+      JSON.stringify(editedRun.results.greeting),
+    );
+    check(
+      'edited payload keeps status and content-type',
+      editedRun.results.greeting?.status === 200 &&
+        String(editedRun.results.greeting?.contentType ?? '').includes('application/json'),
+      JSON.stringify(editedRun.results.greeting),
+    );
+    check(
+      'edited payload never reached the server',
+      server.hitsOf('GET', '/api/greeting') === (hitsBeforeReplay['GET /api/greeting'] ?? 0),
+      `before=${hitsBeforeReplay['GET /api/greeting'] ?? 0} after=${server.hitsOf('GET', '/api/greeting')}`,
+    );
+
+    // Restore the original payload from the same dialog, with replay still active.
+    await clickInPage(client, extensionSession, `[data-testid="edit-entry-${greetingEntry.id}"]`);
+    await waitForDialogOpen(client, extensionSession);
+    const editedEditorText = await evaluate(
+      client,
+      extensionSession,
+      `document.querySelector('[data-testid="payload-editor"]').value`,
+    );
+    check('editor reopens with the saved edit', String(editedEditorText).includes('edited-by-ui'));
+    await clickInPage(client, extensionSession, '[data-testid="restore-payload"]');
+    await waitForDialogClosed(client, extensionSession);
+
+    const restoredEntryResponse = await extensionCall(client, extensionSession, 'scenario.entry.get', {
+      scenarioId,
+      entryId: greetingEntry.id,
+    });
+    check(
+      'restore brings back the original recorded payload',
+      String(restoredEntryResponse?.payload?.text ?? '').includes('hello-v1') &&
+        restoredEntryResponse?.entry?.edited === false,
+      JSON.stringify(restoredEntryResponse?.entry),
+    );
+
+    // Second run proves the restore took effect (the replay cache was refreshed).
     await reloadFixturePage(client, extensionSession, tabId);
     const replayRun = await waitForPageRun(client, extensionSession, tabId, 'the replayed page run');
     check('replayed run had no page errors', replayRun.errors.length === 0, replayRun.errors.join('; '));
@@ -607,11 +770,9 @@ async function main() {
       JSON.stringify(replayResults.xhr),
     );
 
-    const greetingHitsUnchanged =
-      server.hitsOf('GET', '/api/greeting') === (hitsBeforeReplay['GET /api/greeting'] ?? 0);
     check(
       'replayed greeting never reached the server',
-      greetingHitsUnchanged,
+      server.hitsOf('GET', '/api/greeting') === (hitsBeforeReplay['GET /api/greeting'] ?? 0),
       `before=${hitsBeforeReplay['GET /api/greeting'] ?? 0} after=${server.hitsOf('GET', '/api/greeting')}`,
     );
     check(
@@ -630,13 +791,14 @@ async function main() {
       JSON.stringify(replayResults.graphql?.body),
     );
     check(
-      'GraphQL request reached the live server',
-      server.hitsOf('POST', '/api/graphql') === (hitsBeforeReplay['POST /api/graphql'] ?? 0) + 1,
+      'GraphQL requests reached the live server on both replayed runs',
+      server.hitsOf('POST', '/api/graphql') === (hitsBeforeReplay['POST /api/graphql'] ?? 0) + 2,
+      `before=${hitsBeforeReplay['POST /api/graphql'] ?? 0} after=${server.hitsOf('POST', '/api/graphql')}`,
     );
     check(
       'non-XHR image requests stay live',
       replayResults.image?.width === 1 &&
-        server.hitsOf('GET', '/img.png') === (hitsBeforeReplay['GET /img.png'] ?? 0) + 1,
+        server.hitsOf('GET', '/img.png') === (hitsBeforeReplay['GET /img.png'] ?? 0) + 2,
       JSON.stringify(replayResults.image),
     );
 
@@ -646,11 +808,22 @@ async function main() {
       `(async () => {
         const response = await chrome.runtime.sendMessage({ type: 'session.get', tabId: ${tabId} });
         const session = response && response.session;
-        return session && session.hits >= 4 ? session : null;
+        return session && session.hits >= 8 ? session : null;
       })()`,
-      'four replayed requests',
+      'eight replayed requests',
     );
-    check('replay counter is 4', replaySession.hits === 4, JSON.stringify(replaySession));
+    check('replay counter includes both replayed page runs', replaySession.hits === 8, JSON.stringify(replaySession));
+
+    const replayBadge = await waitForValue(
+      client,
+      extensionSession,
+      `(async () => {
+        const text = await chrome.action.getBadgeText({ tabId: ${tabId} });
+        return text === '8' ? text : null;
+      })()`,
+      'the replay badge count',
+    );
+    check('toolbar badge shows the replayed count', replayBadge === '8');
 
     // ---- Live mode: everything goes to the network.
     const greetingHitsBeforeLive = server.hitsOf('GET', '/api/greeting');
@@ -724,6 +897,10 @@ async function main() {
       limit: 50,
     });
     check('replay did not modify the scenario', finalEntries?.total === 4, String(finalEntries?.total));
+    check(
+      'restored request is no longer flagged as edited',
+      finalEntries?.entries?.find((entry) => entry.id === greetingEntry.id)?.edited === false,
+    );
     check('options page had no uncaught errors during the run', optionsErrors.length === 0, optionsErrors.join(' | '));
   } catch (error) {
     console.error(`\nE2E run aborted: ${error.message}`);

@@ -288,6 +288,14 @@ export async function stopSession(tabId, { reason = 'stopped' } = {}) {
 }
 
 /**
+ * Refresh any active replay session after recorded payload data changed.
+ * @param {string} scenarioId
+ */
+export async function refreshScenarioData(scenarioId) {
+  await replay.refreshScenario(scenarioId);
+}
+
+/**
  * Stop every session that uses a scenario (called before deleting it).
  * @param {string} scenarioId
  */
