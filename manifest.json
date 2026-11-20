@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "API Recorder",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Record XHR/fetch responses into named scenarios and replay them transparently, keyed per request body.",
   "minimum_chrome_version": "116",
   "permissions": [

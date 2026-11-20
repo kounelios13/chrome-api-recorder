@@ -40,6 +40,8 @@ const state = {
   renamingId: null,
   pendingDeleteId: null,
   deleteTimer: 0,
+  entryDeleteId: null,
+  entryDeleteTimer: 0,
   entriesScenarioId: null,
   /** @type {Scenario|null} */
   entriesScenario: null,
@@ -247,6 +249,7 @@ function wireEvents() {
 
 function cleanup() {
   clearTimeout(state.deleteTimer);
+  clearTimeout(state.entryDeleteTimer);
   clearTimeout(state.statusTimer);
   clearTimeout(state.savedTimer);
   state.unsubscribe?.();
@@ -1058,6 +1061,25 @@ function renderEntryRow(entry) {
   );
   editButton.addEventListener('click', () => openEntryEditor(entry.id, editButton));
 
+  const deleteConfirming = state.entryDeleteId === entry.id;
+  const deleteButton = el(
+    'button',
+    {
+      class: `btn btn-sm ${deleteConfirming ? 'btn-danger' : 'btn-ghost'} entry-delete-btn`,
+      type: 'button',
+      'data-testid': `delete-entry-${entry.id}`,
+      'aria-label': deleteConfirming
+        ? `Confirm permanently delete ${method} ${url || entry?.url || ''}`
+        : `Delete recorded request ${method} ${url || entry?.url || ''}`,
+      title: deleteConfirming
+        ? 'Click again to permanently delete this recorded request'
+        : 'Delete this recorded request (confirmation required)',
+    },
+    trashIcon(),
+  );
+  if (deleteConfirming) deleteButton.append(' Confirm delete?');
+  deleteButton.addEventListener('click', () => onDeleteEntryClicked(entry));
+
   return el(
     'tr',
     edited ? { class: 'entry-row-edited' } : {},
@@ -1067,7 +1089,7 @@ function renderEntryRow(entry) {
     el('td', { class: 'entry-size' }, size),
     el('td', { class: 'entry-time' }, captured),
     el('td', { class: 'entry-preview', title: preview }, preview || '—'),
-    el('td', { class: 'entry-actions' }, editButton),
+    el('td', { class: 'entry-actions' }, editButton, deleteButton),
   );
 }
 
@@ -1080,6 +1102,8 @@ function closeEntries() {
   dom.entriesFilter.value = '';
   dom.entriesFilterCount.textContent = '';
   dom.entriesFilterClear.hidden = true;
+  state.entryDeleteId = null;
+  clearTimeout(state.entryDeleteTimer);
   dom.entriesPanel.hidden = true;
   dom.entriesBody.replaceChildren();
   dom.entriesEmpty.hidden = true;
@@ -1168,6 +1192,83 @@ async function copyText(text) {
   textarea.select();
   document.execCommand('copy');
   textarea.remove();
+}
+
+/* ------------------------------------------------------------------ */
+/* Per-request deletion                                                */
+/* ------------------------------------------------------------------ */
+
+/** @param {any} entry */
+function onDeleteEntryClicked(entry) {
+  if (state.entryDeleteId !== entry.id) {
+    state.entryDeleteId = entry.id;
+    clearTimeout(state.entryDeleteTimer);
+    state.entryDeleteTimer = window.setTimeout(() => {
+      state.entryDeleteId = null;
+      renderEntryRows();
+    }, DELETE_CONFIRM_MS);
+    renderEntryRows();
+    return;
+  }
+
+  clearTimeout(state.entryDeleteTimer);
+  state.entryDeleteId = null;
+  deleteEntry(entry);
+}
+
+/** @param {any} entry */
+async function deleteEntry(entry) {
+  if (!state.entriesScenarioId) return;
+  hideError();
+  try {
+    const response = await send(MSG.ENTRY_DELETE, {
+      scenarioId: state.entriesScenarioId,
+      entryId: entry.id,
+    });
+
+    state.entries = state.entries.filter((item) => item.id !== entry.id);
+    state.entriesTotal = Math.max(0, state.entriesTotal - 1);
+
+    const updatedScenario = response?.scenario;
+    if (updatedScenario && state.entriesScenario) {
+      const scenarioId = state.entriesScenarioId;
+      const entryCount = toCount(updatedScenario.entryCount);
+      const hosts = Array.isArray(updatedScenario.hosts)
+        ? updatedScenario.hosts.map((host) => String(host))
+        : state.entriesScenario.hosts;
+      state.entriesScenario = { ...state.entriesScenario, entryCount, hosts };
+      state.scenarios = state.scenarios.map((item) =>
+        item.id === scenarioId ? { ...item, entryCount, hosts } : item,
+      );
+      renderScenarios();
+    }
+
+    renderEntryRows();
+    showStatus(
+      `Deleted ${String(entry.method ?? 'GET').toUpperCase()} ${shortUrl(entry.url)} from “${state.entriesScenario?.name ?? 'the scenario'}”.`,
+    );
+  } catch (error) {
+    showError(errorMessage(error, 'Could not delete the recorded request.'));
+  }
+}
+
+function trashIcon() {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('width', '14');
+  svg.setAttribute('height', '14');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '2');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  for (const d of ['M3 6h18', 'M8 6V4h8v2', 'M19 6l-1 14H6L5 6', 'M10 11v6', 'M14 11v6']) {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', d);
+    svg.append(path);
+  }
+  return svg;
 }
 
 /* ------------------------------------------------------------------ */

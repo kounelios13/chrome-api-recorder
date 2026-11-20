@@ -27,6 +27,9 @@ fulfills requests at the network layer, so no page-side monkey-patching is invol
   **Edit** button that opens the response payload in a dialog. Edit and save it to test different
   response shapes; the original payload is kept and can be restored with one click. Replay picks up
   edits immediately, even while a replay session is active.
+- **Per-request deletion** — every row in the recorded-request table has a trash button; the
+  extension asks for an explicit confirmation first, and the scenario's count and host list stay in
+  sync after the removal.
 - **Request filter** — the recorded-request table has a live filter box: type `post /api/orders`,
   `200`, `json`, a URL fragment or a body token to narrow the list before previewing or editing.
   Multiple space-separated terms must all match.
@@ -182,7 +185,8 @@ uploaded anywhere. Deleting a scenario permanently removes its recorded data.
   headers are replayed so the actual request/response works offline from the recording.
 - Navigating a recording/replay tab to a site that is not allowlisted stops the session (recorded
   data is kept). The same happens if the page is closed or DevTools/replaced debugger detaches.
-- Binary response bodies cannot be edited as text (the dialog explains this); text formats such as
+- Deleting a recorded request is permanent (the trash button asks for confirmation first); binary
+  response bodies cannot be edited as text (the dialog explains this); text formats such as
   JSON, XML, HTML and plain text are fully editable. Edits are written byte-for-byte and are not
   JSON-validated, so you can intentionally test malformed payloads (the dialog warns about invalid
   JSON but still lets you save).
@@ -223,7 +227,7 @@ and options pages load without uncaught errors. The payload editor is exercised 
 Settings UI: the recorded response is edited, replay serves the edited bytes, the original is restored
 from the dialog, and the next replay serves the original again. Smart fallback is covered as well:
 an ambiguous request is left live while an unambiguous URL/path match is replayed from storage, and
-the popup/debug-report diagnostics are validated (80 checks).
+the popup/debug-report diagnostics are validated (83 checks).
 
 ## License
 

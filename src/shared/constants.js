@@ -19,6 +19,7 @@ export const MSG = Object.freeze({
   SCENARIO_ENTRIES: 'scenario.entries',
   ENTRY_GET: 'scenario.entry.get',
   ENTRY_UPDATE: 'scenario.entry.update',
+  ENTRY_DELETE: 'scenario.entry.delete',
   EXPORT_SCENARIO: 'scenario.export',
   EXPORT_ALL_SCENARIOS: 'scenario.exportAll',
   IMPORT_SCENARIO: 'scenario.import',

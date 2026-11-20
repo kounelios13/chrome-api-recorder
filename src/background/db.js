@@ -227,6 +227,18 @@ export async function countEntries(scenarioId) {
 }
 
 /**
+ * Delete one recorded request and its response body.
+ * @param {string} id
+ */
+export async function deleteEntry(id) {
+  const database = await openDb();
+  const transaction = database.transaction([DB.ENTRIES, DB.BODIES], 'readwrite');
+  transaction.objectStore(DB.ENTRIES).delete(id);
+  transaction.objectStore(DB.BODIES).delete(id);
+  await transactionDone(transaction);
+}
+
+/**
  * Delete every recorded request (and body) of a scenario.
  * @param {string} scenarioId
  */

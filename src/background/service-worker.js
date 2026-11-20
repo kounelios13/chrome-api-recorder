@@ -249,6 +249,29 @@ async function dispatch(message, sender) {
       return { ok: true, entry: summarizeEntry(editedEntry), hasOriginal };
     }
 
+    case MSG.ENTRY_DELETE: {
+      const { scenarioId, entryId } = requireEntryIds(message);
+      await findRecordedEntry(scenarioId, entryId);
+      await db.deleteEntry(entryId);
+      await sessions.refreshScenarioData(scenarioId);
+
+      // Keep the scenario's hosts and count accurate after the removal.
+      const remaining = await db.listEntries(scenarioId);
+      const hosts = collectEntryHosts(remaining);
+      const scenarios = await store.getScenarios();
+      const scenario = scenarios.find((item) => item.id === scenarioId);
+      if (scenario) {
+        scenario.hosts = hosts;
+        await store.setScenarios(scenarios);
+      }
+
+      return {
+        ok: true,
+        deleted: true,
+        scenario: { ...(scenario ?? {}), entryCount: remaining.length, hosts },
+      };
+    }
+
     case MSG.EXPORT_SCENARIO: {
       const scenarioId = requireString(message.scenarioId, 'Missing scenario id.');
       const scenario = (await store.getScenarios()).find((item) => item.id === scenarioId);

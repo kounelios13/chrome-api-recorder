@@ -1121,3 +1121,20 @@ code {
   gap: 8px;
   flex: none;
 }
+
+
+/* ------------------------------------------------------------------ */
+/* Per-request delete button                                           */
+/* ------------------------------------------------------------------ */
+
+.entry-actions .btn + .btn {
+  margin-left: 6px;
+}
+
+.entry-delete-btn {
+  padding: 2px 6px;
+}
+
+.entry-delete-btn svg {
+  display: block;
+}

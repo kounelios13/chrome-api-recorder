@@ -1200,6 +1200,48 @@ async function main() {
       'restored request is no longer flagged as edited',
       finalEntries?.entries?.find((entry) => entry.id === greetingEntry.id)?.edited === false,
     );
+
+    // ---- Per-request deletion with explicit confirmation.
+    const xhrEntry = entries.find((entry) => new URL(entry.url).pathname === '/api/xhr');
+    await clickInPage(client, extensionSession, `[data-testid="delete-entry-${xhrEntry.id}"]`);
+    await waitForValue(
+      client,
+      extensionSession,
+      `(() => {
+        const button = document.querySelector('[data-testid="delete-entry-${xhrEntry.id}"]');
+        return Boolean(button && /confirm/i.test(button.textContent));
+      })()`,
+      'the delete confirmation state',
+    );
+    const confirmLabel = await evaluate(
+      client,
+      extensionSession,
+      `String(document.querySelector('[data-testid="delete-entry-${xhrEntry.id}"]').textContent ?? '')`,
+    );
+    check('deleting a request asks for explicit confirmation first', /confirm/i.test(confirmLabel), confirmLabel);
+
+    await clickInPage(client, extensionSession, `[data-testid="delete-entry-${xhrEntry.id}"]`);
+    await waitForValue(
+      client,
+      extensionSession,
+      `!document.querySelector('[data-testid="delete-entry-${xhrEntry.id}"]')`,
+      'the deleted request to disappear from the list',
+    );
+
+    const entriesAfterDelete = await extensionCall(client, extensionSession, 'scenario.entries', {
+      scenarioId,
+      limit: 50,
+    });
+    check(
+      'the request was removed from the recording',
+      entriesAfterDelete?.total === 3 &&
+        !(entriesAfterDelete.entries ?? []).some((entry) => entry.id === xhrEntry.id),
+      JSON.stringify(entriesAfterDelete?.total),
+    );
+
+    const stateAfterDelete = await extensionCall(client, extensionSession, 'state.get', { tabId });
+    const scenarioAfterDelete = (stateAfterDelete?.scenarios ?? []).find((item) => item.id === scenarioId);
+    check('the scenario count updates after the deletion', scenarioAfterDelete?.entryCount === 3, JSON.stringify(scenarioAfterDelete?.entryCount));
     check('options page had no uncaught errors during the run', optionsErrors.length === 0, optionsErrors.join(' | '));
   } catch (error) {
     console.error(`\nE2E run aborted: ${error.message}`);
