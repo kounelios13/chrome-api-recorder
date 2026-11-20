@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>API Recorder</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="app-header">
+        <div class="brand">
+          <span class="logo" aria-hidden="true">
+            <svg viewBox="0 0 20 20" width="20" height="20" fill="none">
+              <circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="1.5" opacity="0.45" />
+              <circle cx="10" cy="10" r="3.5" fill="currentColor" class="logo-dot" />
+            </svg>
+          </span>
+          <div class="brand-copy">
+            <h1 class="brand-title">API Recorder</h1>
+            <p class="brand-subtitle">Record &amp; replay XHR/fetch</p>
+          </div>
+          <span id="version-chip" class="version-chip" data-testid="version" hidden></span>
+        </div>
+      </header>
+
+      <div id="error-banner" class="banner banner-error" role="alert" hidden>
+        <span class="banner-icon" aria-hidden="true">!</span>
+        <span id="error-text" class="banner-text"></span>
+        <button id="error-dismiss" class="banner-dismiss" type="button" aria-label="Dismiss error">×</button>
+      </div>
+
+      <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
+
+      <main class="content">
+        <section id="site-card" class="card" aria-labelledby="site-card-title">
+          <div class="card-head">
+            <h2 id="site-card-title" class="card-title">Current site</h2>
+            <span id="site-status" class="badge badge-neutral">Checking…</span>
+          </div>
+          <div id="site-body" class="site-body" aria-live="polite">
+            <p class="site-message skeleton">Checking this tab…</p>
+          </div>
+        </section>
+
+        <section id="scenarios-card" class="card" aria-labelledby="scenarios-card-title">
+          <div class="card-head">
+            <h2 id="scenarios-card-title" class="card-title">Scenario</h2>
+            <span id="scenario-count" class="count-chip" title="Total scenarios">0</span>
+          </div>
+          <label class="field-label" for="scenario-select">Active scenario</label>
+          <select id="scenario-select" class="select" data-testid="scenario-select" disabled>
+            <option value="">No scenarios yet</option>
+          </select>
+          <p id="scenario-empty" class="empty-hint" hidden>
+            No scenarios yet. Create one below to start recording.
+          </p>
+          <div id="scenario-row" class="scenario-row" hidden></div>
+          <form id="new-scenario-form" class="inline-form" autocomplete="off" novalidate>
+            <label class="sr-only" for="new-scenario-name">New scenario name</label>
+            <input
+              id="new-scenario-name"
+              class="input input-grow"
+              type="text"
+              maxlength="64"
+              placeholder="New scenario name"
+              data-testid="new-scenario-name"
+            />
+            <button id="create-scenario" class="btn btn-secondary btn-sm" type="submit" data-testid="create-scenario">
+              Create
+            </button>
+          </form>
+          <p id="scenario-field-error" class="field-error" role="alert" hidden></p>
+        </section>
+
+        <section id="session-card" class="card card-session" aria-labelledby="session-card-title" hidden>
+          <div class="card-head">
+            <h2 id="session-card-title" class="card-title">Session</h2>
+            <span id="session-mode" class="badge badge-neutral" data-testid="session-mode">RECORDING</span>
+          </div>
+          <p id="session-scenario" class="session-scenario" data-testid="session-scenario"></p>
+          <div class="session-meta">
+            <span id="session-timer" class="session-timer" role="timer" aria-label="Elapsed time">00:00</span>
+            <span class="muted">elapsed</span>
+          </div>
+          <dl id="session-counters" class="counters" aria-live="polite">
+            <div class="counter">
+              <dt>Recorded</dt>
+              <dd id="counter-recorded" data-testid="counter-recorded">0</dd>
+            </div>
+            <div class="counter">
+              <dt>Hits</dt>
+              <dd id="counter-hits" data-testid="counter-hits">0</dd>
+            </div>
+            <div class="counter">
+              <dt>Misses</dt>
+              <dd id="counter-misses" data-testid="counter-misses">0</dd>
+            </div>
+            <div class="counter">
+              <dt>Skipped</dt>
+              <dd id="counter-skipped" data-testid="counter-skipped">0</dd>
+            </div>
+          </dl>
+          <p id="session-error" class="field-error" role="alert" hidden></p>
+          <div id="session-actions" class="actions actions-session"></div>
+        </section>
+
+        <section id="start-card" class="card" aria-labelledby="start-card-title" hidden>
+          <div class="card-head">
+            <h2 id="start-card-title" class="card-title">Start</h2>
+            <span id="start-scenario" class="count-chip count-chip-wide" data-testid="selected-scenario">No scenario</span>
+          </div>
+          <p id="start-hint" class="hint" hidden></p>
+          <div class="actions actions-start">
+            <button id="start-recording" class="btn btn-record" type="button" data-testid="start-recording" disabled>
+              Start recording
+            </button>
+            <button id="start-replay" class="btn btn-replay" type="button" data-testid="start-replay" disabled>
+              Start replay
+            </button>
+          </div>
+        </section>
+      </main>
+
+      <footer class="app-footer">
+        <span id="footer-count" class="footer-count" data-testid="footer-scenario-count">0 scenarios</span>
+        <button id="open-settings" class="btn btn-ghost btn-sm" type="button" data-testid="open-settings">
+          Settings
+        </button>
+      </footer>
+    </div>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

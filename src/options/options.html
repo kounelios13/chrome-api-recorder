@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>API Recorder — Settings</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="page-header">
+        <div class="brand">
+          <span class="logo" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="26" height="26" fill="none">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.6" opacity="0.45" />
+              <circle cx="12" cy="12" r="4.25" fill="currentColor" class="logo-dot" />
+            </svg>
+          </span>
+          <div class="brand-copy">
+            <h1 class="brand-title">API Recorder</h1>
+            <p class="brand-subtitle">Settings &amp; recorded scenarios</p>
+          </div>
+          <span id="version-chip" class="version-chip" data-testid="version" hidden></span>
+        </div>
+        <p class="page-lede">
+          Record XHR/fetch responses once, then replay them per tab without touching the server.
+          Everything below applies to every tab that the extension runs on.
+        </p>
+      </header>
+
+      <div id="error-banner" class="banner banner-error" role="alert" hidden>
+        <span class="banner-icon" aria-hidden="true">!</span>
+        <span id="error-text" class="banner-text"></span>
+        <button id="error-dismiss" class="banner-dismiss" type="button" aria-label="Dismiss error">×</button>
+      </div>
+
+      <p id="status-line" class="status-line" role="status" aria-live="polite" hidden></p>
+
+      <main class="layout">
+        <section class="card card-note" aria-labelledby="how-title">
+          <div class="card-head">
+            <h2 id="how-title" class="card-title">How it works</h2>
+          </div>
+          <ul class="plain-list">
+            <li>Records only <strong>XHR and fetch</strong> traffic, using the Chrome debugger API.</li>
+            <li>
+              Each request is keyed by <strong>method + normalized URL + exact request body</strong>, so the same endpoint with a
+              different body is stored as a separate recording.
+            </li>
+            <li>GraphQL-looking requests (URL or body) are skipped and always hit the real network.</li>
+            <li>Recording and replay run <strong>only on the sites listed below</strong>.</li>
+            <li><strong>Live mode</strong> sends every request to the real network without touching recordings.</li>
+            <li>Sessions are <strong>per tab</strong>. One tab can record while another replays.</li>
+          </ul>
+        </section>
+
+        <section class="card" aria-labelledby="sites-title">
+          <div class="card-head">
+            <div>
+              <h2 id="sites-title" class="card-title">Sites</h2>
+              <p class="card-desc">The extension only records and replays on these sites.</p>
+            </div>
+            <span id="sites-count" class="count-chip">0</span>
+          </div>
+
+          <ul id="sites-list" class="site-list" data-testid="sites-list" aria-live="polite"></ul>
+          <p id="sites-empty" class="empty-hint" hidden>No sites yet. Add one below to start recording.</p>
+
+          <form id="add-site-form" class="inline-form" autocomplete="off" novalidate>
+            <label class="sr-only" for="site-input">Site to allow</label>
+            <input
+              id="site-input"
+              class="input input-grow"
+              type="text"
+              placeholder="example.com or https://example.com/app"
+              autocomplete="off"
+              spellcheck="false"
+              data-testid="site-input"
+            />
+            <button id="add-site" class="btn btn-primary" type="submit" data-testid="add-site">Add site</button>
+          </form>
+          <p id="site-field-error" class="field-error" role="alert" hidden></p>
+
+          <div class="add-all">
+            <button id="add-all-sites" class="btn btn-secondary btn-sm" type="button">Add all http(s) sites</button>
+            <p class="warning-text">
+              <strong>Warning:</strong> this grants access to every website
+              (<code>*://*/*</code>). Chrome asks for host access; only do this on a development machine.
+            </p>
+          </div>
+
+          <p class="card-footnote">
+            Chrome asks for host access when you add a site. Access applies to the whole site — every path on that host
+            — and can be removed here at any time.
+          </p>
+        </section>
+
+        <section class="card" aria-labelledby="settings-title">
+          <div class="card-head">
+            <div>
+              <h2 id="settings-title" class="card-title">Settings</h2>
+              <p class="card-desc">Tune what is captured and how replay behaves.</p>
+            </div>
+          </div>
+
+          <form id="settings-form" class="settings-form" novalidate>
+            <div class="field">
+              <label class="field-label" for="max-body-mb">Max response size (MB)</label>
+              <input
+                id="max-body-mb"
+                class="input input-number"
+                type="number"
+                min="0.01"
+                max="200"
+                step="0.01"
+                inputmode="decimal"
+                data-testid="max-body-mb"
+              />
+              <p class="field-hint">Responses larger than this are skipped during recording. Range 0.01–200 MB.</p>
+            </div>
+
+            <label class="check" for="skip-graphql">
+              <input id="skip-graphql" type="checkbox" data-testid="skip-graphql" />
+              <span class="check-copy">
+                <span class="check-title">Skip GraphQL requests</span>
+                <span class="check-hint">GraphQL traffic is never recorded or replayed; it always goes live.</span>
+              </span>
+            </label>
+
+            <label class="check" for="replay-cookies">
+              <input id="replay-cookies" type="checkbox" data-testid="replay-cookies" />
+              <span class="check-copy">
+                <span class="check-title">Replay recorded Set-Cookie headers</span>
+                <span class="check-hint">Off by default so replaying a scenario cannot pollute the page's cookies.</span>
+              </span>
+            </label>
+
+            <div class="actions">
+              <button id="save-settings" class="btn btn-primary" type="submit" data-testid="save-settings">
+                Save settings
+              </button>
+              <button id="reset-settings" class="btn btn-ghost" type="button">Reset to defaults</button>
+              <span id="settings-saved" class="saved-note" role="status" hidden>Saved</span>
+            </div>
+            <p id="settings-field-error" class="field-error" role="alert" hidden></p>
+          </form>
+        </section>
+
+        <section class="card" aria-labelledby="scenarios-title">
+          <div class="card-head">
+            <div>
+              <h2 id="scenarios-title" class="card-title">Scenarios</h2>
+              <p class="card-desc">Recorded response sets. Create scenarios from the extension popup.</p>
+            </div>
+            <span id="scenarios-count" class="count-chip">0</span>
+          </div>
+
+          <ul id="scenario-list" class="scenario-list" data-testid="scenario-list" aria-live="polite"></ul>
+          <p id="scenarios-empty" class="empty-hint" hidden>
+            No scenarios yet. Open the extension popup on a page and create one there.
+          </p>
+
+          <div id="entries-panel" class="entries-panel" data-testid="entries-panel" hidden>
+            <div class="entries-head">
+              <h3 id="entries-title" class="entries-title">Recorded requests</h3>
+              <button id="entries-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close requests panel">
+                Close
+              </button>
+            </div>
+            <div class="table-wrap">
+              <table class="entries-table">
+                <caption class="sr-only">Recorded requests in the selected scenario</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Method</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">URL</th>
+                    <th scope="col">Size</th>
+                    <th scope="col">Captured</th>
+                    <th scope="col">Response preview</th>
+                  </tr>
+                </thead>
+                <tbody id="entries-body"></tbody>
+              </table>
+            </div>
+            <p id="entries-empty" class="empty-hint" hidden>No requests recorded in this scenario yet.</p>
+          </div>
+        </section>
+
+        <section class="card card-danger" aria-labelledby="limits-title">
+          <div class="card-head">
+            <h2 id="limits-title" class="card-title">Limits &amp; warnings</h2>
+          </div>
+          <ul class="plain-list">
+            <li>
+              <strong>Deleting a scenario permanently deletes its recorded data.</strong> Responses stored for it are removed
+              and cannot be recovered.
+            </li>
+            <li>
+              <strong>DevTools cannot be open on a tab while recording or replaying it.</strong> Chrome allows only one
+              debugger client per tab, so close DevTools on the page before starting a session.
+            </li>
+            <li>
+              If you navigate outside the added sites, the session stops. Recordings captured so far are kept.
+            </li>
+            <li>
+              Recording is skipped for request bodies that are too large to key reliably, and for responses above the size
+              limit set in Settings.
+            </li>
+          </ul>
+        </section>
+      </main>
+
+      <footer class="page-footer">
+        <span id="footer-version" class="footer-meta">API Recorder</span>
+        <span class="footer-meta">Sessions are per tab. Shortcuts: popup from the toolbar.</span>
+      </footer>
+    </div>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>
