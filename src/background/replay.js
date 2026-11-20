@@ -6,11 +6,16 @@
  * requests are answered with `Fetch.fulfillRequest` (the transparent part),
  * everything else is forwarded with `Fetch.continueRequest`.
  *
- * The match key is `method + normalized URL + exact request body`, so the same
- * endpoint with a different POST body maps to a different recording.
+ * Matching is tiered (see shared/matchIndex.js):
+ *   exact (method + normalized URL + body) → unambiguous URL → unambiguous path.
+ * The fallback tiers make replayed sessions work against APIs that embed
+ * timestamps/tokens in request bodies or cache-busting query strings, without
+ * guessing when several recordings could apply. Every live pass records a
+ * diagnostic reason that the popup surfaces.
  */
 import { base64ToBytes, concatBytes, utf8ToBytes } from '../shared/bytes.js';
 import { isGraphqlRequest, requestKey } from '../shared/matchkey.js';
+import { buildMatchIndexes, lookupRecording } from '../shared/matchIndex.js';
 import { sanitizeResponseHeaders } from '../shared/headers.js';
 import * as cdp from './cdp.js';
 import * as db from './db.js';
@@ -30,7 +35,7 @@ export function isReplaying(tabId) {
  *   tabId: number,
  *   scenarioId: string,
  *   session: object,
- *   settings: {skipGraphql:boolean, replayCookies:boolean},
+ *   settings: {skipGraphql:boolean, replayCookies:boolean, smartFallback:boolean},
  *   hooks: object,
  * }} options
  */
@@ -42,19 +47,15 @@ export async function startReplay({ tabId, scenarioId, session, settings, hooks 
     throw new Error('This scenario has no recorded requests yet. Record it once, then replay.');
   }
 
-  const index = new Map();
-  for (const entry of entries) {
-    if (entry && typeof entry.matchKey === 'string') index.set(entry.matchKey, entry);
-  }
-
   await cdp.ensureAttached(tabId);
+
   const state = {
     tabId,
     scenarioId,
     session,
     settings,
     hooks,
-    index,
+    indexes: buildMatchIndexes(entries),
     live: false,
     bodyCache: new Map(),
   };
@@ -71,30 +72,6 @@ export async function startReplay({ tabId, scenarioId, session, settings, hooks 
     }
     throw error;
   }
-}
-
-/**
- * Reload the match index and clear cached bodies for every active replay of a
- * scenario. Called after a recorded payload is edited or restored so the next
- * intercepted request serves the new bytes (even mid-session).
- * @param {string} scenarioId
- * @returns {Promise<boolean>} whether any active replay was refreshed
- */
-export async function refreshScenario(scenarioId) {
-  const entries = await db.listEntries(scenarioId);
-  const index = new Map();
-  for (const entry of entries) {
-    if (entry && typeof entry.matchKey === 'string') index.set(entry.matchKey, entry);
-  }
-
-  let refreshed = false;
-  for (const state of replayers.values()) {
-    if (state.scenarioId !== scenarioId) continue;
-    state.index = index;
-    state.bodyCache.clear();
-    refreshed = true;
-  }
-  return refreshed;
 }
 
 /**
@@ -141,6 +118,26 @@ export async function stopReplay(tabId, { detach = true } = {}) {
 }
 
 /**
+ * Reload match indexes and clear cached bodies for every active replay of a
+ * scenario. Called after a recorded payload is edited or restored so the next
+ * intercepted request serves the new bytes (even mid-session).
+ * @param {string} scenarioId
+ * @returns {Promise<boolean>} whether any active replay was refreshed
+ */
+export async function refreshScenario(scenarioId) {
+  const entries = await db.listEntries(scenarioId);
+
+  let refreshed = false;
+  for (const state of replayers.values()) {
+    if (state.scenarioId !== scenarioId) continue;
+    state.indexes = buildMatchIndexes(entries);
+    state.bodyCache.clear();
+    refreshed = true;
+  }
+  return refreshed;
+}
+
+/**
  * @param {number} tabId
  * @param {string} method
  * @param {any} params
@@ -161,6 +158,11 @@ export function handleEvent(tabId, method, params) {
     } catch {
       /* request may be gone */
     }
+    state.hooks.onMiss?.(state.session, params?.request ?? {}, {
+      reason: 'fulfill-error',
+      sameUrl: 0,
+      samePath: 0,
+    });
     state.hooks.onWarning?.(state.session, `Replay failed for one request: ${error.message}`);
   });
 
@@ -184,31 +186,55 @@ async function handlePaused(tabId, state, params) {
   if (params?.resourceType !== 'XHR' && params?.resourceType !== 'Fetch') return continueLive();
 
   const body = readPausedBody(request);
+  const smartFallback = state.settings.smartFallback !== false;
+  const method = request.method ?? 'GET';
+  const url = String(request.url ?? '');
+
   if (body.unknown) {
-    state.hooks.onMiss?.(state.session, request);
+    const lookup = lookupRecording(state.indexes, { method, url, matchKey: null }, { smartFallback });
+    if (!lookup.entry) {
+      state.hooks.onMiss?.(state.session, request, {
+        reason: 'body-unavailable',
+        sameUrl: lookup.sameUrl,
+        samePath: lookup.samePath,
+      });
+      return continueLive();
+    }
+    return fulfillRequest(tabId, state, requestId, request, lookup.entry, lookup.matchedVia);
+  }
+
+  if (state.settings.skipGraphql && isGraphqlRequest({ url, bodyBytes: body.bytes })) {
     return continueLive();
   }
 
-  if (state.settings.skipGraphql && isGraphqlRequest({ url: request.url, bodyBytes: body.bytes })) {
+  const matchKey = await requestKey({ method, url, bodyBytes: body.bytes });
+  const lookup = lookupRecording(state.indexes, { method, url, matchKey }, { smartFallback });
+
+  if (!lookup.entry) {
+    state.hooks.onMiss?.(state.session, request, {
+      reason: lookup.reason,
+      sameUrl: lookup.sameUrl,
+      samePath: lookup.samePath,
+    });
     return continueLive();
   }
 
-  const matchKey = await requestKey({
-    method: request.method ?? 'GET',
-    url: String(request.url ?? ''),
-    bodyBytes: body.bytes,
-  });
+  return fulfillRequest(tabId, state, requestId, request, lookup.entry, lookup.matchedVia);
+}
 
-  const entry = state.index.get(matchKey);
-  if (!entry) {
-    state.hooks.onMiss?.(state.session, request);
-    return continueLive();
-  }
-
+/**
+ * @param {number} tabId
+ * @param {object} state
+ * @param {string} requestId
+ * @param {any} request
+ * @param {object} entry
+ * @param {'exact'|'url'|'path'} matchedVia
+ */
+async function fulfillRequest(tabId, state, requestId, request, entry, matchedVia) {
   const record = await loadBody(state, entry.id);
   if (!record) {
-    state.hooks.onMiss?.(state.session, request);
-    return continueLive();
+    state.hooks.onMiss?.(state.session, request, { reason: 'body-missing', sameUrl: 0, samePath: 0 });
+    return cdp.sendCommand(tabId, 'Fetch.continueRequest', { requestId });
   }
 
   const status = Number(entry.status) || 200;
@@ -224,7 +250,7 @@ async function handlePaused(tabId, state, params) {
   if (canHaveBody(status) && record.body) fulfillParams.body = record.body;
 
   await cdp.sendCommand(tabId, 'Fetch.fulfillRequest', fulfillParams);
-  state.hooks.onHit?.(state.session, entry);
+  state.hooks.onHit?.(state.session, entry, { matchedVia });
 }
 
 /**

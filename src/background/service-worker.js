@@ -255,6 +255,46 @@ async function dispatch(message, sender) {
     case MSG.SITES_LIST:
       return { ok: true, sites: await sites.listSites() };
 
+    case MSG.DEBUG_STATE: {
+      const [settings, sitesList, scenarios] = await Promise.all([
+        store.getSettings(),
+        sites.listSites(),
+        store.getScenarios(),
+      ]);
+
+      const scenarioReports = [];
+      for (const scenario of scenarios) {
+        const entries = await db.listEntries(scenario.id);
+        entries.sort((left, right) => (right.capturedAt ?? 0) - (left.capturedAt ?? 0));
+        scenarioReports.push({
+          id: scenario.id,
+          name: scenario.name,
+          entryCount: entries.length,
+          entries: entries.slice(0, 100).map((entry) => ({
+            method: entry.method,
+            url: entry.url,
+            status: entry.status,
+            size: entry.size,
+            requestPreview: entry.requestPreview,
+            edited: Boolean(entry.edited),
+            capturedAt: entry.capturedAt,
+          })),
+        });
+      }
+
+      return {
+        ok: true,
+        report: {
+          generatedAt: Date.now(),
+          version: chrome.runtime.getManifest().version,
+          settings,
+          sites: sitesList,
+          scenarios: scenarioReports,
+          sessions: sessions.listSessionPayloads(),
+        },
+      };
+    }
+
     case MSG.KEEPALIVE:
       return { ok: true, at: Date.now() };
 

@@ -29,10 +29,10 @@ const PAGE_HTML = `<!doctype html>
     };
 
     window.__test.probes = {};
-    window.__probe = (tag, url) => {
+    window.__probe = (tag, url, options) => {
       const record = { done: false, status: 0, body: '', contentType: '', error: null };
       window.__test.probes[tag] = record;
-      fetch(url)
+      fetch(url, options ?? {})
         .then(async (response) => {
           record.status = response.status;
           record.contentType = response.headers.get('content-type') || '';

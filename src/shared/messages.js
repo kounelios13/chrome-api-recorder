@@ -26,6 +26,7 @@
  *  sites.add              {pattern} -> {sites}
  *  sites.remove           {pattern} -> {sites}
  *  sites.list             {} -> {sites}
+ *  debug.state            {} -> {report} (scenario request signatures + active sessions)
  *  keepalive              {} -> {}
  *
  * The UIs should import `send` instead of calling chrome.runtime.sendMessage

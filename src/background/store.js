@@ -82,6 +82,9 @@ export function sanitizeSettings(input) {
   if (typeof /** @type {any} */ (input).replayCookies === 'boolean') {
     out.replayCookies = /** @type {any} */ (input).replayCookies;
   }
+  if (typeof /** @type {any} */ (input).smartFallback === 'boolean') {
+    out.smartFallback = /** @type {any} */ (input).smartFallback;
+  }
   return out;
 }
 

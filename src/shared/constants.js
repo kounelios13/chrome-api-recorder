@@ -23,6 +23,7 @@ export const MSG = Object.freeze({
   SITES_ADD: 'sites.add',
   SITES_REMOVE: 'sites.remove',
   SITES_LIST: 'sites.list',
+  DEBUG_STATE: 'debug.state',
   KEEPALIVE: 'keepalive',
 });
 
@@ -64,6 +65,11 @@ export const DEFAULT_SETTINGS = Object.freeze({
   skipGraphql: true,
   /** Replay recorded Set-Cookie headers (off by default so replay cannot pollute cookies). */
   replayCookies: false,
+  /**
+   * When an exact method + URL + body recording is missing, replay the only
+   * recording for the same URL (or same path) if that fallback is unambiguous.
+   */
+  smartFallback: true,
 });
 
 export const LIMITS = Object.freeze({

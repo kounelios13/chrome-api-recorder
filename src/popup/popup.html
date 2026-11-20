@@ -102,6 +102,22 @@
               <dd id="counter-skipped" data-testid="counter-skipped">0</dd>
             </div>
           </dl>
+          <div id="session-diagnostics" class="session-diagnostics" data-testid="session-diagnostics" hidden>
+            <button
+              id="diagnostics-toggle"
+              class="diagnostics-toggle"
+              type="button"
+              aria-expanded="false"
+              data-testid="diagnostics-toggle"
+            >
+              <span id="diagnostics-summary" class="diagnostics-summary" data-testid="diagnostics-summary"></span>
+              <span class="diagnostics-chevron" aria-hidden="true">▾</span>
+            </button>
+            <div id="diagnostics-body" class="diagnostics-body" hidden>
+              <p id="diagnostics-hint" class="diagnostics-hint" hidden data-testid="diagnostics-hint"></p>
+              <ul id="diagnostics-list" class="diagnostics-list" data-testid="diagnostics-list"></ul>
+            </div>
+          </div>
           <p id="session-error" class="field-error" role="alert" hidden></p>
           <div id="session-actions" class="actions actions-session"></div>
         </section>

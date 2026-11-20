@@ -12,7 +12,7 @@
 import { BROADCAST, DEFAULT_SETTINGS, LIMITS, MSG, SESSION_MODE } from '../shared/constants.js';
 import { onBroadcast, send } from '../shared/messages.js';
 import { matchesPattern, patternForTabUrl } from '../shared/patterns.js';
-import { hostOf, isHttpUrl } from '../shared/url.js';
+import { hostOf, isHttpUrl, shortUrl } from '../shared/url.js';
 import { normalizeScenarioName } from '../shared/scenarios.js';
 
 const LAST_SCENARIO_KEY = 'apirr:lastScenario';
@@ -50,6 +50,7 @@ const state = {
   renamingId: null,
   pendingDeleteId: null,
   pendingScenarioRender: false,
+  showDiagnostics: false,
 
   timerId: 0,
   deleteTimer: 0,
@@ -121,6 +122,12 @@ function cacheDom() {
     'counter-hits',
     'counter-misses',
     'counter-skipped',
+    'session-diagnostics',
+    'diagnostics-toggle',
+    'diagnostics-summary',
+    'diagnostics-body',
+    'diagnostics-hint',
+    'diagnostics-list',
     'session-error',
     'session-actions',
     'start-card',
@@ -145,6 +152,7 @@ function toCamel(id) {
 
 function wireStaticEvents() {
   dom.errorDismiss.addEventListener('click', hideError);
+  dom.diagnosticsToggle.addEventListener('click', onDiagnosticsToggle);
   dom.newScenarioForm.addEventListener('submit', onCreateScenario);
   dom.scenarioSelect.addEventListener('change', onScenarioSelectionChange);
   dom.scenarioSelect.addEventListener('blur', onScenarioSelectBlur);
@@ -270,8 +278,37 @@ function normalizeSession(value) {
     hits: toCount(value.hits),
     misses: toCount(value.misses),
     skipped: toCount(value.skipped),
+    missReasons: normalizeMissReasons(value.missReasons),
+    diagnostics: normalizeDiagnostics(value.diagnostics),
     error: value.error ? String(value.error) : null,
   };
+}
+
+/** @param {unknown} value @returns {Record<string, number>} */
+function normalizeMissReasons(value) {
+  const out = {};
+  if (!value || typeof value !== 'object') return out;
+  for (const [reason, count] of Object.entries(value)) {
+    const number = toCount(count);
+    if (number > 0) out[String(reason)] = number;
+  }
+  return out;
+}
+
+/** @param {unknown} value */
+function normalizeDiagnostics(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item) => item && typeof item === 'object' && typeof item.url === 'string')
+    .slice(-10)
+    .map((item) => ({
+      method: String(item.method ?? 'GET').toUpperCase(),
+      url: String(item.url),
+      reason: String(item.reason ?? 'no-recording'),
+      sameUrl: toCount(item.sameUrl),
+      samePath: toCount(item.samePath),
+      at: Number(item.at) || 0,
+    }));
 }
 
 /** @param {unknown} value @returns {number|null} */
@@ -390,6 +427,7 @@ async function confirmSessionStopped() {
 function clearShownSession() {
   state.session = null;
   state.pendingDeleteId = null;
+  state.showDiagnostics = false;
   stopTimer();
   renderAll();
 }
@@ -635,6 +673,8 @@ function renderSession() {
   if (!session) {
     dom.sessionCard.hidden = true;
     dom.sessionCard.removeAttribute('data-mode');
+    dom.sessionDiagnostics.hidden = true;
+    state.showDiagnostics = false;
     stopTimer();
     return;
   }
@@ -791,6 +831,105 @@ function updateSessionCounters(session) {
   setText(dom.counterHits, session.hits);
   setText(dom.counterMisses, session.misses);
   setText(dom.counterSkipped, session.skipped);
+  updateSessionDiagnostics(session);
+}
+
+const REASON_LABELS = {
+  'no-recording': 'no recording',
+  'body-differs': 'body differs',
+  'url-differs': 'URL differs',
+  'ambiguous-body': 'ambiguous body',
+  'ambiguous-url': 'ambiguous URL',
+  'body-unavailable': 'body unavailable',
+  'body-missing': 'body missing',
+  'fulfill-error': 'replay error',
+};
+
+/** @param {string} reason */
+function reasonLabel(reason) {
+  return REASON_LABELS[reason] ?? String(reason ?? 'unknown');
+}
+
+function onDiagnosticsToggle() {
+  state.showDiagnostics = !state.showDiagnostics;
+  if (state.session) updateSessionDiagnostics(state.session);
+}
+
+/** @param {Session} session */
+function updateSessionDiagnostics(session) {
+  const diagnostics = session.diagnostics ?? [];
+  const reasons = session.missReasons ?? {};
+  const show =
+    session.mode !== SESSION_MODE.RECORDING && session.misses > 0 && diagnostics.length > 0;
+
+  if (!show) {
+    dom.sessionDiagnostics.hidden = true;
+    state.showDiagnostics = false;
+    return;
+  }
+
+  dom.sessionDiagnostics.hidden = false;
+
+  const reasonParts = Object.entries(reasons)
+    .filter(([, count]) => count > 0)
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 2)
+    .map(([reason, count]) => `${count} ${reasonLabel(reason)}`);
+  setText(
+    dom.diagnosticsSummary,
+    `${session.misses} request${session.misses === 1 ? '' : 's'} stayed live${
+      reasonParts.length ? ` · ${reasonParts.join(' · ')}` : ''
+    }`,
+  );
+
+  dom.diagnosticsToggle.setAttribute('aria-expanded', String(state.showDiagnostics));
+  dom.diagnosticsBody.hidden = !state.showDiagnostics;
+
+  const hint = diagnosticsHint(diagnostics, state.settings);
+  dom.diagnosticsHint.hidden = !hint;
+  dom.diagnosticsHint.textContent = hint;
+
+  dom.diagnosticsList.replaceChildren();
+  for (const entry of [...diagnostics].slice(-6).reverse()) {
+    dom.diagnosticsList.append(
+      el(
+        'li',
+        { class: 'diagnostics-item', title: entry.url },
+        el('span', { class: 'diagnostics-method' }, entry.method),
+        el('span', { class: 'diagnostics-url' }, shortUrl(entry.url) || entry.url),
+        el('span', { class: 'diagnostics-reason' }, reasonLabel(entry.reason)),
+      ),
+    );
+  }
+}
+
+/**
+ * @param {Array<{reason:string,sameUrl:number,samePath:number}>} diagnostics
+ * @param {{smartFallback?:boolean}} settings
+ */
+function diagnosticsHint(diagnostics, settings) {
+  const reasons = new Set(diagnostics.map((entry) => entry.reason));
+  if (reasons.has('ambiguous-body')) {
+    return 'Several recordings share this URL with different request bodies, so matching was refused. Delete the extra variants in Settings or re-record this scenario.';
+  }
+  if (reasons.has('ambiguous-url')) {
+    return 'Several recordings share this endpoint with different URLs, so matching was refused. Delete the extra variants in Settings or re-record this scenario.';
+  }
+  if (reasons.has('body-differs') || reasons.has('url-differs')) {
+    return settings?.smartFallback === false
+      ? 'Enable “Smart fallback matching” in Settings to replay recordings with a similar URL/body.'
+      : 'A similar recording exists but is ambiguous. Edit the recorded payload or re-record this scenario.';
+  }
+  if (reasons.has('body-unavailable')) {
+    return 'Chrome did not expose the request body for these requests. Enable “Smart fallback matching” in Settings or re-record the scenario.';
+  }
+  if (reasons.has('body-missing')) {
+    return 'The stored response body is missing. Re-record this scenario.';
+  }
+  if (reasons.has('fulfill-error')) {
+    return 'The recorded response could not be returned. Reload the extension and try again.';
+  }
+  return 'These requests have no recording in this scenario. Record them again, or check the recorded URLs in Settings.';
 }
 
 /** @param {Session} session */

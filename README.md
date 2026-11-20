@@ -19,6 +19,10 @@ fulfills requests at the network layer, so no page-side monkey-patching is invol
 - **Transparent replay** — while a scenario replays, matching requests are answered with the stored
   status/headers/body exactly as the server would have answered. Non-matching requests pass through
   live, so the app keeps working.
+- **Smart fallback matching + live-pass diagnostics** — if no exact recording matches, replay falls
+  back to the only recording for the same URL (or same path, ignoring query strings) when that choice
+  is unambiguous. Requests that still go live are listed in the popup with the reason (no recording,
+  body differs, ambiguous, …), and Settings → Troubleshooting can copy a debug report.
 - **Editable payloads** — in Settings → Scenarios → *View requests*, every recorded request has an
   **Edit** button that opens the response payload in a dialog. Edit and save it to test different
   response shapes; the original payload is kept and can be restored with one click. Replay picks up
@@ -121,6 +125,18 @@ The fragment is ignored and query parameters are sorted; the body is compared by
 above 2 MB are skipped during recording because they cannot be keyed reliably. If a request body
 cannot be observed by Chrome, that request is not recorded (recording never stores an ambiguous key).
 
+On replay the lookup is tiered to survive real-world APIs that embed timestamps/tokens in bodies or
+cache-busting values in query strings:
+
+1. **exact** — method + normalized URL + exact request body (the recorded key).
+2. **same URL** — method + normalized URL, used only when exactly one recording exists for it.
+3. **same endpoint** — method + origin + path, ignoring the query string, used only when exactly one
+   recording exists for it.
+
+Fallback tiers are controlled by the **Smart fallback matching** setting (on by default) and never
+guess: if several recordings could apply, the request goes live and the popup reports it. Disable the
+setting for strict exact matching.
+
 ## Data & privacy
 
 Everything is stored locally in the extension (`chrome.storage.local` for metadata, IndexedDB for
@@ -147,6 +163,20 @@ uploaded anywhere. Deleting a scenario permanently removes its recorded data.
 - Chrome match patterns ignore ports: adding `localhost:3000` allowlists every port on `localhost`.
 - `start`/`stop` are per tab. One active session per tab; switching modes stops the previous one.
 
+### Replay reports requests as “stayed live”
+
+1. Keep the popup open briefly during replay: the Session card shows **“N requests stayed live”**.
+   Expand it to see the method, shortened URL and reason for each (no recording, body differs, URL
+   differs, ambiguous candidates, body unavailable, replay error).
+2. Compare those URLs with **Settings → Scenarios → View requests**. If the recorded URL/body differs
+   (dynamic query values, CSRF tokens, timestamps in JSON bodies, redirect targets), keep **Smart
+   fallback matching** enabled (default) or re-record the request.
+3. If several recordings share an endpoint, matching is refused as ambiguous. Re-record the scenario
+   while hitting the endpoint once, or edit/remove the extra recordings.
+4. If replay still pass-throughs everything, use **Settings → Troubleshooting → Copy debug report**
+(it includes settings, allowed sites, recorded request signatures and live-pass diagnostics), and
+   make sure you reloaded the unpacked extension after updating it (chrome://extensions → Reload).
+
 ## Development
 
 ```bash
@@ -165,7 +195,9 @@ version is bumped to prove no network hit, GraphQL and images stay live, Live mo
 unrecorded requests pass through, replay can be resumed, counters/badges are correct, and the popup
 and options pages load without uncaught errors. The payload editor is exercised through the real
 Settings UI: the recorded response is edited, replay serves the edited bytes, the original is restored
-from the dialog, and the next replay serves the original again (55 checks).
+from the dialog, and the next replay serves the original again. Smart fallback is covered as well:
+an ambiguous request is left live while an unambiguous URL/path match is replayed from storage, and
+the popup/debug-report diagnostics are validated (65 checks).
 
 ## License
 

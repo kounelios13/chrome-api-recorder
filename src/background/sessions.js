@@ -37,6 +37,11 @@ export function getSession(tabId) {
   return sessions.get(tabId) ?? null;
 }
 
+/** All active sessions (used by the debug report). */
+export function listSessionPayloads() {
+  return [...sessions.values()].map((session) => payload(session));
+}
+
 /** @param {any} session */
 export function payload(session) {
   if (!session) return null;
@@ -50,6 +55,8 @@ export function payload(session) {
     hits: session.hits,
     misses: session.misses,
     skipped: session.skipped,
+    missReasons: { ...(session.missReasons ?? {}) },
+    diagnostics: (session.diagnostics ?? []).slice(-10),
     error: session.error ?? null,
   };
 }
@@ -70,6 +77,10 @@ function newSession(tabId, mode, scenario) {
     hits: 0,
     misses: 0,
     skipped: 0,
+    /** @type {Record<string, number>} */
+    missReasons: {},
+    /** @type {Array<{method:string,url:string,reason:string,sameUrl:number,samePath:number,at:number}>} */
+    diagnostics: [],
     error: null,
   };
 }
@@ -120,7 +131,7 @@ function createHooks(tabId) {
       });
       scheduleFlush(tabId);
     },
-    onHit(session, entry) {
+    onHit(session, entry, info = {}) {
       session.hits += 1;
       pushFeed(tabId, {
         kind: FEED_KIND.REPLAYED,
@@ -129,18 +140,38 @@ function createHooks(tabId) {
         status: entry.status,
         size: entry.size,
         at: Date.now(),
+        matchedVia: info.matchedVia ?? 'exact',
       });
       scheduleFlush(tabId);
     },
-    onMiss(session, request) {
+    onMiss(session, request, info = {}) {
       session.misses += 1;
+
+      const method = String(request?.method ?? 'GET').toUpperCase();
+      const url = String(request?.url ?? '');
+      const reason = String(info.reason ?? 'no-recording');
+      session.missReasons = session.missReasons ?? {};
+      session.missReasons[reason] = (session.missReasons[reason] ?? 0) + 1;
+
+      session.diagnostics = session.diagnostics ?? [];
+      session.diagnostics.push({
+        method,
+        url,
+        reason,
+        sameUrl: Number(info.sameUrl) || 0,
+        samePath: Number(info.samePath) || 0,
+        at: Date.now(),
+      });
+      if (session.diagnostics.length > 10) session.diagnostics.splice(0, session.diagnostics.length - 10);
+
       pushFeed(tabId, {
         kind: FEED_KIND.LIVE,
-        method: String(request?.method ?? 'GET'),
-        url: String(request?.url ?? ''),
+        method,
+        url,
         status: 0,
         size: 0,
         at: Date.now(),
+        reason,
       });
       scheduleFlush(tabId);
     },

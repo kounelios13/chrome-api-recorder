@@ -51,6 +51,10 @@
             <li>GraphQL-looking requests (URL or body) are skipped and always hit the real network.</li>
             <li>Recording and replay run <strong>only on the sites listed below</strong>.</li>
             <li>
+              If no exact recording matches, <strong>smart fallback matching</strong> replays the only recording for the
+              same URL (or same path) when unambiguous. Requests that still go live are explained in the popup.
+            </li>
+            <li>
               Recorded payloads can be <strong>edited per request</strong> from the Scenarios section; the
               original body is kept so you can restore it.
             </li>
@@ -132,6 +136,18 @@
               </span>
             </label>
 
+            <label class="check" for="smart-fallback">
+              <input id="smart-fallback" type="checkbox" data-testid="smart-fallback" />
+              <span class="check-copy">
+                <span class="check-title">Smart fallback matching</span>
+                <span class="check-hint">
+                  When no exact method + URL + body recording exists, replay the only recording for the same URL (or
+                  same path, ignoring query strings) if that choice is unambiguous. Requests with several candidate
+                  recordings still go live.
+                </span>
+              </span>
+            </label>
+
             <label class="check" for="replay-cookies">
               <input id="replay-cookies" type="checkbox" data-testid="replay-cookies" />
               <span class="check-copy">
@@ -190,6 +206,27 @@
               </table>
             </div>
             <p id="entries-empty" class="empty-hint" hidden>No requests recorded in this scenario yet.</p>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="troubleshooting-title">
+          <div class="card-head">
+            <div>
+              <h2 id="troubleshooting-title" class="card-title">Troubleshooting</h2>
+              <p class="card-desc">Replay still sends requests to the real network?</p>
+            </div>
+          </div>
+          <ul class="plain-list">
+            <li>Open the extension popup while replaying: the Session card lists every request that stayed live and why.</li>
+            <li>Compare the recorded URLs under “View requests” with the live requests in the browser DevTools network panel.</li>
+            <li>If the request body or query string differs from the recording, keep “Smart fallback matching” enabled in Settings.</li>
+            <li>Reload the unpacked extension after updating the source code: chrome://extensions → Reload.</li>
+          </ul>
+          <div class="actions">
+            <button id="copy-debug-report" class="btn btn-secondary" type="button" data-testid="copy-debug-report">
+              Copy debug report
+            </button>
+            <span class="card-desc">Includes settings, allowed sites, recorded request signatures and live-pass diagnostics.</span>
           </div>
         </section>
 

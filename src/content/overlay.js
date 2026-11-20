@@ -272,6 +272,13 @@
       status.className = 'status';
       status.textContent = event.status ? String(event.status) : '';
 
+      if (event.kind === 'replayed' && event.matchedVia && event.matchedVia !== 'exact') {
+        badge.textContent = 'RPL*';
+        item.title = `Replayed with ${event.matchedVia === 'url' ? 'URL' : 'path'} fallback match`;
+      } else if (event.kind === 'live' && event.reason) {
+        item.title = `Passed live: ${overlayReasonLabel(event.reason)}`;
+      }
+
       item.append(badge, method, url, status);
       refs.feed.appendChild(item);
     }
@@ -297,6 +304,22 @@
     if (session.mode === 'recording') return `${session.recorded} recorded${skipped}`;
     if (session.mode === 'replay') return `${session.hits} replayed · ${session.misses} passed live${skipped}`;
     return `Live mode — ${session.hits} replayed earlier, ${session.misses} passed live`;
+  }
+
+  const OVERLAY_REASONS = {
+    'no-recording': 'no recording for this request',
+    'body-differs': 'same URL recorded, different request body',
+    'url-differs': 'same endpoint recorded, different URL',
+    'ambiguous-body': 'several recordings share this URL',
+    'ambiguous-url': 'several recordings share this endpoint',
+    'body-unavailable': 'Chrome did not expose the request body',
+    'body-missing': 'recorded response body missing',
+    'fulfill-error': 'recorded response could not be returned',
+  };
+
+  /** @param {string} reason */
+  function overlayReasonLabel(reason) {
+    return OVERLAY_REASONS[reason] ?? String(reason ?? 'unknown reason');
   }
 
   /** @param {string} kind */

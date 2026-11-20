@@ -128,6 +128,7 @@ function normalizeSettings(value) {
     maxBodyBytes: Number.isFinite(bytes) && bytes > 0 ? bytes : DEFAULT_SETTINGS.maxBodyBytes,
     skipGraphql: merged.skipGraphql !== false,
     replayCookies: merged.replayCookies === true,
+    smartFallback: merged.smartFallback !== false,
   };
 }
 
@@ -155,6 +156,7 @@ function cacheDom() {
     'settings-form',
     'max-body-mb',
     'skip-graphql',
+    'smart-fallback',
     'replay-cookies',
     'save-settings',
     'reset-settings',
@@ -169,6 +171,7 @@ function cacheDom() {
     'entries-body',
     'entries-empty',
     'footer-version',
+    'copy-debug-report',
     'entry-editor',
     'entry-editor-form',
     'entry-editor-title',
@@ -210,6 +213,8 @@ function wireEvents() {
   dom.entryEditorRestore.addEventListener('click', onRestorePayload);
   dom.entryEditorFormat.addEventListener('click', onFormatPayload);
   dom.payloadEditor.addEventListener('input', updateEditorHint);
+  dom.copyDebugReport.addEventListener('click', (event) => copyDebugReport(event.currentTarget));
+
   dom.entryEditor.addEventListener('close', () => {
     state.editing = null;
     hideFieldError(dom.entryEditorError);
@@ -439,6 +444,7 @@ function requestOrigins(origins) {
 function renderSettings() {
   dom.maxBodyMb.value = formatMb(state.settings.maxBodyBytes);
   dom.skipGraphql.checked = state.settings.skipGraphql !== false;
+  dom.smartFallback.checked = state.settings.smartFallback !== false;
   dom.replayCookies.checked = state.settings.replayCookies === true;
   hideFieldError(dom.settingsFieldError);
 }
@@ -460,6 +466,7 @@ async function onSaveSettings(event) {
   const settings = {
     maxBodyBytes: Math.round(megabytes * MB),
     skipGraphql: dom.skipGraphql.checked,
+    smartFallback: dom.smartFallback.checked,
     replayCookies: dom.replayCookies.checked,
   };
   const saved = await persistSettings(settings, dom.saveSettings);
@@ -926,6 +933,44 @@ function formatTimestamp(value) {
   } catch {
     return '—';
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Diagnostics                                                         */
+/* ------------------------------------------------------------------ */
+
+/** @param {HTMLButtonElement} button */
+async function copyDebugReport(button) {
+  hideError();
+  setBusy(button, true);
+  try {
+    const response = await send(MSG.DEBUG_STATE);
+    const report = response?.report;
+    if (!report) throw new Error('The debug report could not be generated.');
+    await copyText(JSON.stringify(report, null, 2));
+    showStatus('Debug report copied. It contains URLs and request body previews.');
+  } catch (error) {
+    showError(errorMessage(error, 'Could not copy the debug report.'));
+  } finally {
+    if (button.isConnected) setBusy(button, false);
+  }
+}
+
+/** @param {string} text */
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.append(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  textarea.remove();
 }
 
 /* ------------------------------------------------------------------ */

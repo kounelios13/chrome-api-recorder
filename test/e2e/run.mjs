@@ -384,15 +384,15 @@ async function reloadFixturePage(client, extensionSession, tabId) {
  * @param {string} tag
  * @param {string} path
  */
-async function startProbe(client, extensionSession, tabId, tag, path) {
+async function startProbe(client, extensionSession, tabId, tag, path, options = null) {
   await runInPage(
     client,
     extensionSession,
     tabId,
-    (probeTag, probePath) => {
-      window.__probe(probeTag, probePath);
+    (probeTag, probePath, probeOptions) => {
+      window.__probe(probeTag, probePath, probeOptions);
     },
-    [tag, path],
+    [tag, path, options],
   );
 }
 
@@ -513,10 +513,19 @@ async function main() {
         hasSiteInput: Boolean(document.querySelector('[data-testid="site-input"]')),
         hasSaveSettings: Boolean(document.querySelector('[data-testid="save-settings"]')),
         hasScenarioList: Boolean(document.querySelector('[data-testid="scenario-list"]')),
+        hasDebugReport: Boolean(document.querySelector('[data-testid="copy-debug-report"]')),
         siteRows: document.querySelectorAll('[data-testid^="remove-site-"]').length,
       }))()`,
     );
-    check('options page renders sites and settings controls', optionsDom.hasSiteInput && optionsDom.hasSaveSettings && optionsDom.hasScenarioList && optionsDom.siteRows === 1, JSON.stringify(optionsDom));
+    check(
+      'options page renders sites, settings and troubleshooting controls',
+      optionsDom.hasSiteInput &&
+        optionsDom.hasSaveSettings &&
+        optionsDom.hasScenarioList &&
+        optionsDom.hasDebugReport &&
+        optionsDom.siteRows === 1,
+      JSON.stringify(optionsDom),
+    );
 
     const popupTarget = await createAttachedTarget(client, `chrome-extension://${extensionId}/src/popup/popup.html`);
     const popupErrors = collectRuntimeErrors(client, popupTarget.sessionId);
@@ -560,6 +569,7 @@ async function main() {
       JSON.stringify(state?.currentSite),
     );
     check('state.get starts with no scenarios', Array.isArray(state?.scenarios) && state.scenarios.length === 0);
+    check('smart fallback matching is enabled by default', state?.settings?.smartFallback === true, JSON.stringify(state?.settings));
 
     // ---- Create a scenario and record a fresh page run.
     const created = await extensionCall(client, extensionSession, 'scenario.create', { name: 'E2E checkout' });
@@ -623,6 +633,21 @@ async function main() {
 
     const greetingEntry = entries.find((entry) => new URL(entry.url).pathname === '/api/greeting');
     check('greeting entry is available for editing', Boolean(greetingEntry?.id));
+
+    const debugResponse = await extensionCall(client, extensionSession, 'debug.state');
+    const debugReport = debugResponse?.report;
+    const debugScenario = (debugReport?.scenarios ?? []).find((item) => item.id === scenarioId);
+    check(
+      'debug report includes recorded request signatures',
+      debugScenario?.entries?.length === 4 &&
+        debugScenario.entries.some((entry) => entry.url.includes('/api/greeting')),
+      JSON.stringify(debugScenario?.entries?.map((entry) => entry.url)),
+    );
+    check(
+      'debug report includes active session data',
+      (debugReport?.sessions ?? []).some((session) => session.tabId === tabId),
+      JSON.stringify(debugReport?.sessions),
+    );
 
     await extensionCall(client, extensionSession, 'session.stop', { tabId });
     const afterStop = await extensionCall(client, extensionSession, 'session.get', { tabId });
@@ -824,6 +849,64 @@ async function main() {
       'the replay badge count',
     );
     check('toolbar badge shows the replayed count', replayBadge === '8');
+
+    // ---- Smart fallback matching + diagnostics for requests that stay live.
+    const greetingHitsBeforeFallback = server.hitsOf('GET', '/api/greeting');
+    await startProbe(client, extensionSession, tabId, 'fallback-path', '/api/greeting?cacheBust=123');
+    const fallbackProbe = await waitForProbe(client, extensionSession, tabId, 'fallback-path');
+    const fallbackBody = probeJson(fallbackProbe);
+    check(
+      'smart fallback replays a recording with a different query string',
+      fallbackProbe.status === 200 && fallbackBody?.version === 'v1',
+      JSON.stringify({ status: fallbackProbe.status, body: fallbackBody }),
+    );
+    check(
+      'smart fallback did not hit the server',
+      server.hitsOf('GET', '/api/greeting') === greetingHitsBeforeFallback,
+      `before=${greetingHitsBeforeFallback} after=${server.hitsOf('GET', '/api/greeting')}`,
+    );
+
+    const echoHitsBeforeAmbiguous = server.hitsOf('POST', '/api/echo');
+    await startProbe(client, extensionSession, tabId, 'fallback-ambiguous', '/api/echo', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 3 }),
+    });
+    const ambiguousProbe = await waitForProbe(client, extensionSession, tabId, 'fallback-ambiguous');
+    const ambiguousBody = probeJson(ambiguousProbe);
+    check(
+      'ambiguous fallback stays live instead of guessing',
+      ambiguousProbe.status === 200 && ambiguousBody?.version === 'v2' && ambiguousBody?.echo?.id === 3,
+      JSON.stringify({ status: ambiguousProbe.status, body: ambiguousBody }),
+    );
+    check(
+      'ambiguous fallback reached the server',
+      server.hitsOf('POST', '/api/echo') === echoHitsBeforeAmbiguous + 1,
+      `before=${echoHitsBeforeAmbiguous} after=${server.hitsOf('POST', '/api/echo')}`,
+    );
+
+    const diagnosticsResponse = await extensionCall(client, extensionSession, 'session.get', { tabId });
+    const diagnosticsSession = diagnosticsResponse?.session;
+    check(
+      'live passes are categorized for diagnostics',
+      diagnosticsSession?.missReasons?.['ambiguous-body'] >= 1,
+      JSON.stringify(diagnosticsSession?.missReasons),
+    );
+    check(
+      'diagnostics list the request that stayed live',
+      (diagnosticsSession?.diagnostics ?? []).some(
+        (entry) => entry.reason === 'ambiguous-body' && entry.url.includes('/api/echo'),
+      ),
+      JSON.stringify(diagnosticsSession?.diagnostics),
+    );
+
+    const debugAfterMisses = await extensionCall(client, extensionSession, 'debug.state');
+    const reportSession = (debugAfterMisses?.report?.sessions ?? []).find((session) => session.tabId === tabId);
+    check(
+      'debug report includes live-pass diagnostics',
+      reportSession?.missReasons?.['ambiguous-body'] >= 1,
+      JSON.stringify(reportSession?.missReasons),
+    );
 
     // ---- Live mode: everything goes to the network.
     const greetingHitsBeforeLive = server.hitsOf('GET', '/api/greeting');
