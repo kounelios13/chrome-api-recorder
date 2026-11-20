@@ -12,6 +12,7 @@ import { normalizeSiteInput } from '../shared/patterns.js';
 import { shortUrl } from '../shared/url.js';
 import { normalizeScenarioName } from '../shared/scenarios.js';
 import { filterEntries } from '../shared/filterEntries.js';
+import { scenarioFileSlug } from '../shared/scenarioTransfer.js';
 
 const MB = 1024 * 1024;
 const MIN_MB = 0.01;
@@ -118,6 +119,7 @@ function normalizeScenarios(value) {
         createdAt,
         updatedAt: Number(item.updatedAt) || createdAt,
         entryCount: toCount(item.entryCount),
+        hosts: Array.isArray(item.hosts) ? item.hosts.map((host) => String(host)) : [],
       };
     });
 }
@@ -165,6 +167,9 @@ function cacheDom() {
     'settings-saved',
     'settings-field-error',
     'scenarios-count',
+    'import-scenarios',
+    'import-file',
+    'export-all-scenarios',
     'scenario-list',
     'scenarios-empty',
     'entries-panel',
@@ -227,6 +232,9 @@ function wireEvents() {
   dom.entryEditorFormat.addEventListener('click', onFormatPayload);
   dom.payloadEditor.addEventListener('input', updateEditorHint);
   dom.copyDebugReport.addEventListener('click', (event) => copyDebugReport(event.currentTarget));
+  dom.importScenarios.addEventListener('click', () => dom.importFile.click());
+  dom.exportAllScenarios.addEventListener('click', (event) => exportAllScenarios(event.currentTarget));
+  dom.importFile.addEventListener('change', onImportFileSelected);
 
   dom.entryEditor.addEventListener('close', () => {
     state.editing = null;
@@ -531,6 +539,122 @@ function showSaved(message) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Scenario import / export                                            */
+/* ------------------------------------------------------------------ */
+
+/** @param {HTMLButtonElement} button */
+async function exportAllScenarios(button) {
+  hideError();
+  setBusy(button, true);
+  try {
+    const response = await send(MSG.EXPORT_ALL_SCENARIOS);
+    const data = response?.data;
+    if (!data || !Array.isArray(data.scenarios)) throw new Error('The export came back empty.');
+
+    const fileName =
+      typeof response?.fileName === 'string' && response.fileName
+        ? response.fileName
+        : 'api-recorder-scenarios.json';
+    const scenarioCount = data.scenarios.length;
+    const requestCount = data.scenarios.reduce(
+      (sum, section) => sum + (Array.isArray(section.entries) ? section.entries.length : 0),
+      0,
+    );
+    downloadJson(fileName, data);
+    showStatus(
+      `Exported ${scenarioCount} scenario${scenarioCount === 1 ? '' : 's'} with ${requestCount} request${requestCount === 1 ? '' : 's'}.`,
+    );
+  } catch (error) {
+    showError(errorMessage(error, 'Could not export all scenarios.'));
+  } finally {
+    if (button.isConnected) setBusy(button, false);
+  }
+}
+
+/**
+ * @param {Scenario} scenario
+ * @param {HTMLButtonElement} button
+ */
+async function exportScenario(scenario, button) {
+  hideError();
+  setBusy(button, true);
+  try {
+    const response = await send(MSG.EXPORT_SCENARIO, { scenarioId: scenario.id });
+    const data = response?.data;
+    if (!data) throw new Error('The export came back empty.');
+
+    const fileName =
+      typeof response?.fileName === 'string' && response.fileName
+        ? response.fileName
+        : `api-recorder-scenario-${scenarioFileSlug(scenario.name)}.json`;
+    const entryCount = Array.isArray(data.entries) ? data.entries.length : 0;
+    downloadJson(fileName, data);
+    showStatus(`Exported “${scenario.name}” with ${entryCount} request${entryCount === 1 ? '' : 's'}.`);
+  } catch (error) {
+    showError(errorMessage(error, 'Could not export the scenario.'));
+  } finally {
+    if (button.isConnected) setBusy(button, false);
+  }
+}
+
+/**
+ * @param {string} fileName
+ * @param {object} data
+ */
+function downloadJson(fileName, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+/** @param {Event} event */
+async function onImportFileSelected(event) {
+  const input = /** @type {HTMLInputElement} */ (event.currentTarget);
+  const file = input.files?.[0];
+  input.value = ''; // allow selecting the same file again later
+  if (!file) return;
+
+  hideError();
+  try {
+    const text = await file.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error('The selected file is not valid JSON.');
+    }
+
+    const response = await send(MSG.IMPORT_SCENARIO, { data });
+    const importedScenarios = Array.isArray(response?.scenarios) ? response.scenarios : [];
+    const imported = toCount(response?.imported);
+    const skipped = toCount(response?.skipped);
+    await refreshScenarios();
+
+    if (importedScenarios.length === 1) {
+      showStatus(
+        `Imported “${importedScenarios[0]?.name ?? 'scenario'}” with ${imported} request${imported === 1 ? '' : 's'}${
+          skipped > 0 ? ` (${skipped} skipped)` : ''
+        }.`,
+      );
+    } else {
+      showStatus(
+        `Imported ${importedScenarios.length} scenarios with ${imported} request${imported === 1 ? '' : 's'}${
+          skipped > 0 ? ` (${skipped} skipped)` : ''
+        }.`,
+      );
+    }
+  } catch (error) {
+    showError(errorMessage(error, 'Could not import the file.'));
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Scenarios                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -574,7 +698,12 @@ function renderScenarioRow(scenario) {
 
   const count = scenario.entryCount;
   const created = formatDate(scenario.createdAt);
-  const meta = [`${count} request${count === 1 ? '' : 's'}`, created ? `created ${created}` : '']
+  const hostList = scenario.hosts ?? [];
+  const meta = [
+    `${count} request${count === 1 ? '' : 's'}`,
+    created ? `created ${created}` : '',
+    hostList.length > 0 ? `hosts: ${hostList.join(', ')}` : '',
+  ]
     .filter(Boolean)
     .join(' · ');
 
@@ -610,6 +739,19 @@ function renderScenarioRow(scenario) {
   );
   renameButton.addEventListener('click', () => beginRename(scenario));
 
+  const exportButton = el(
+    'button',
+    {
+      class: 'btn btn-ghost btn-sm',
+      type: 'button',
+      'data-testid': `export-scenario-${scenario.id}`,
+      'aria-label': `Export scenario ${scenario.name}`,
+      title: 'Download this scenario as a JSON file to share or back up',
+    },
+    'Export',
+  );
+  exportButton.addEventListener('click', () => exportScenario(scenario, exportButton));
+
   const confirming = state.pendingDeleteId === scenario.id;
   const deleteButton = el(
     'button',
@@ -622,7 +764,7 @@ function renderScenarioRow(scenario) {
   );
   deleteButton.addEventListener('click', () => onDeleteClicked(scenario, deleteButton));
 
-  const actions = el('div', { class: 'scenario-actions' }, viewButton, renameButton, deleteButton);
+  const actions = el('div', { class: 'scenario-actions' }, exportButton, viewButton, renameButton, deleteButton);
   row.append(main, actions);
   return row;
 }

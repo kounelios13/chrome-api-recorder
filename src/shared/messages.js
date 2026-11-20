@@ -15,13 +15,16 @@
  *  session.startReplay    {tabId, scenarioId} -> {session}
  *  session.setLive        {tabId, live:boolean} -> {session}
  *  session.stop           {tabId} -> {session:null}
- *  scenario.create        {name} -> {scenario}
+ *  scenario.create        {name, host?} -> {scenario} (host seeds the popup's per-host list)
  *  scenario.rename        {id, name} -> {scenario}
  *  scenario.delete        {id} -> {scenarios}
  *  scenario.entries       {scenarioId, limit?} -> {entries}
  *  scenario.entry.get     {scenarioId, entryId} -> {entry, payload, editable, hasOriginal}
  *  scenario.entry.update  {scenarioId, entryId, bodyText} -> {entry, hasOriginal}
  *                         {scenarioId, entryId, restoreOriginal:true} -> {entry, hasOriginal}
+ *  scenario.export        {scenarioId} -> {fileName, data} (single-scenario JSON document)
+ *  scenario.exportAll      {} -> {fileName, data, scenarioCount} (collection JSON document)
+ *  scenario.import         {data} -> {scenarios, imported, skipped} (accepts both document kinds)
  *  settings.set           {settings} -> {settings}
  *  sites.add              {pattern} -> {sites}
  *  sites.remove           {pattern} -> {sites}

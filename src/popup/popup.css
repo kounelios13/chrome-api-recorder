@@ -957,3 +957,27 @@ body::-webkit-scrollbar-thumb:hover {
   flex: none;
   color: var(--warn);
 }
+
+
+/* ------------------------------------------------------------------ */
+/* Per-host scenario filter                                            */
+/* ------------------------------------------------------------------ */
+
+.scenario-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.scenario-label-row .field-label {
+  margin: 0;
+}
+
+.host-filter-toggle {
+  flex: none;
+}
+
+.scenario-filter-hint {
+  margin: 6px 0 0;
+}

@@ -30,6 +30,14 @@ fulfills requests at the network layer, so no page-side monkey-patching is invol
 - **Request filter** — the recorded-request table has a live filter box: type `post /api/orders`,
   `200`, `json`, a URL fragment or a body token to narrow the list before previewing or editing.
   Multiple space-separated terms must all match.
+- **Per-host scenario list** — the popup shows only the scenarios that recorded requests on the
+  current tab's host, with a **This host / All** toggle. New scenarios seed the current host
+  automatically; scenarios recorded before this feature backfill their hosts from stored requests.
+- **Import / export** — export a single scenario **or every scenario at once** to a JSON file
+  (request metadata + response bodies) and import it on another machine or profile. Import accepts
+  both single-scenario and bulk files. Match keys travel with the entries, so replay keeps working
+  on the imported copies; name collisions get a `(imported N)` suffix and invalid entries are
+  skipped with a reason.
 
   ![Payload editor dialog](docs/payload-editor.png)
 - **Per-tab sessions** — a tab can record while another tab replays. A session survives page reloads
@@ -73,6 +81,20 @@ per site, the first time you add it.
    press **Save payload**. Replay now serves the edited body; **Restore original** brings the recorded
    body back.
 
+### Sharing a scenario
+
+- **Export**: Settings → Scenarios → **Export** downloads `api-recorder-scenario-<name>-<date>.json`;
+  **Export all** downloads `api-recorder-scenarios-<date>.json` with every scenario that has recorded
+  requests.
+- **Import**: Settings → Scenarios → **Import recordings…** accepts both kinds of files — one scenario
+  or many. Every imported scenario gets a fresh id and name-collisions are renamed (`(imported N)`);
+  response bodies are validated against the “Max response size” setting and entries that fail
+  validation are skipped with a reason.
+- The per-request match key is preserved verbatim — it was derived from the original request body and
+  cannot be recomputed from the export — so replay and body-aware matching work exactly as recorded.
+- The file contains only local data (method, URL, status, headers, body previews and the response
+  body). Review it before sharing; response bodies can contain sensitive application data.
+
 ## How it works
 
 - **Recording** attaches `chrome.debugger` and enables the CDP `Network` domain. On
@@ -112,7 +134,7 @@ src/
   popup/               toolbar popup: scenario management, record/replay/live, enable site
   options/             settings page: sites, settings, scenario management
   shared/              pure helpers: match keys, URL normalization, headers, patterns, entry bodies,
-                       messages
+                       scenario hosts, import/export format, filters, messages
 test/unit/             Node test runner tests for the pure logic
 test/e2e/              real Chrome for Testing end-to-end suite
 ```
@@ -201,7 +223,7 @@ and options pages load without uncaught errors. The payload editor is exercised 
 Settings UI: the recorded response is edited, replay serves the edited bytes, the original is restored
 from the dialog, and the next replay serves the original again. Smart fallback is covered as well:
 an ambiguous request is left live while an unambiguous URL/path match is replayed from storage, and
-the popup/debug-report diagnostics are validated (67 checks).
+the popup/debug-report diagnostics are validated (80 checks).
 
 ## License
 

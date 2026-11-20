@@ -42,6 +42,16 @@ export function bytesToBase64(input) {
   return btoa(binary);
 }
 
+/**
+ * Is this string well-formed base64 (including the empty string)?
+ * @param {unknown} value
+ */
+export function isBase64(value) {
+  if (typeof value !== 'string') return false;
+  if (value.length % 4 !== 0) return false;
+  return /^[A-Za-z0-9+/]*={0,2}$/.test(value);
+}
+
 /** @param {string} base64 */
 export function base64ToBytes(base64) {
   const binary = atob(base64 ?? '');

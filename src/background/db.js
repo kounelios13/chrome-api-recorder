@@ -181,6 +181,28 @@ export async function restoreEntryBody(entry) {
 }
 
 /**
+ * Persist many entries and bodies in a single transaction (used by scenario
+ * import so large files do not pay one transaction per request).
+ *
+ * @param {Array<{entry: object, body: string, originalBody?: string}>} records
+ */
+export async function saveEntriesBulk(records) {
+  const database = await openDb();
+  const transaction = database.transaction([DB.ENTRIES, DB.BODIES], 'readwrite');
+  const entryStore = transaction.objectStore(DB.ENTRIES);
+  const bodyStore = transaction.objectStore(DB.BODIES);
+
+  for (const record of records) {
+    entryStore.put(record.entry);
+    const bodyRecord = { id: record.entry.id, body: record.body };
+    if (typeof record.originalBody === 'string') bodyRecord.originalBody = record.originalBody;
+    bodyStore.put(bodyRecord);
+  }
+
+  await transactionDone(transaction);
+}
+
+/**
  * All metadata for one scenario (bodies are not loaded).
  * @param {string} scenarioId
  * @returns {Promise<object[]>}

@@ -1109,3 +1109,15 @@ code {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+
+
+/* ------------------------------------------------------------------ */
+/* Scenario import / export                                            */
+/* ------------------------------------------------------------------ */
+
+.scenarios-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}

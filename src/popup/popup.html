@@ -49,10 +49,22 @@
             <h2 id="scenarios-card-title" class="card-title">Scenario</h2>
             <span id="scenario-count" class="count-chip" title="Total scenarios">0</span>
           </div>
-          <label class="field-label" for="scenario-select">Active scenario</label>
+          <div class="scenario-label-row">
+            <label class="field-label" for="scenario-select">Active scenario</label>
+            <button
+              id="host-filter-toggle"
+              class="btn btn-ghost btn-sm host-filter-toggle"
+              type="button"
+              aria-pressed="true"
+              data-testid="host-filter-toggle"
+            >
+              This host
+            </button>
+          </div>
           <select id="scenario-select" class="select" data-testid="scenario-select" disabled>
             <option value="">No scenarios yet</option>
           </select>
+          <p id="scenario-filter-hint" class="empty-hint scenario-filter-hint" hidden></p>
           <p id="scenario-empty" class="empty-hint" hidden>
             No scenarios yet. Create one below to start recording.
           </p>

@@ -7,6 +7,7 @@
  */
 import { BADGE, BROADCAST, FEED_KIND, SESSION_MODE } from '../shared/constants.js';
 import { isUrlAllowed } from '../shared/patterns.js';
+import { entryHost } from '../shared/scenarioHosts.js';
 import { isHttpUrl } from '../shared/url.js';
 import * as broadcast from './broadcast.js';
 import * as cdp from './cdp.js';
@@ -21,6 +22,11 @@ const sessions = new Map();
 const flushTimers = new Map();
 /** @type {Map<string, Set<string>>} de-duplicated transient toasts per session */
 const toastHistory = new Map();
+
+/** @type {Map<string, Set<string>>} hosts waiting to be added to scenario metadata */
+const pendingHosts = new Map();
+/** @type {Map<string, ReturnType<typeof setTimeout>>} */
+const hostFlushTimers = new Map();
 /**
  * Tabs where we intentionally detach the debugger (stop/restart). The
  * chrome.debugger.onDetach event is async and can arrive after a new session
@@ -121,6 +127,7 @@ function createHooks(tabId) {
   return {
     onCaptured(session, entry) {
       session.recorded += 1;
+      scheduleHostUpdate(session.scenarioId, entry.url);
       pushFeed(tabId, {
         kind: FEED_KIND.RECORDED,
         method: entry.method,
@@ -614,6 +621,32 @@ async function persistSessions() {
     skipped: session.skipped,
   }));
   await store.writeTabSessions(snapshots);
+}
+
+/**
+ * Record the request host on the scenario (debounced), so the popup can show
+ * only scenarios that recorded on the current tab's host.
+ * @param {string} scenarioId
+ * @param {string} url
+ */
+function scheduleHostUpdate(scenarioId, url) {
+  const host = entryHost(url);
+  if (!host) return;
+
+  const hosts = pendingHosts.get(scenarioId) ?? new Set();
+  hosts.add(host);
+  pendingHosts.set(scenarioId, hosts);
+
+  if (hostFlushTimers.has(scenarioId)) return;
+  hostFlushTimers.set(
+    scenarioId,
+    setTimeout(() => {
+      hostFlushTimers.delete(scenarioId);
+      const collected = [...(pendingHosts.get(scenarioId) ?? [])];
+      pendingHosts.delete(scenarioId);
+      void store.addScenarioHosts(scenarioId, collected);
+    }, 600),
+  );
 }
 
 /**

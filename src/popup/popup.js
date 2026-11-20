@@ -14,6 +14,7 @@ import { onBroadcast, send } from '../shared/messages.js';
 import { matchesPattern, patternForTabUrl } from '../shared/patterns.js';
 import { hostOf, isHttpUrl, shortUrl } from '../shared/url.js';
 import { normalizeScenarioName } from '../shared/scenarios.js';
+import { filterScenariosByHost } from '../shared/scenarioHosts.js';
 
 const LAST_SCENARIO_KEY = 'apirr:lastScenario';
 const DELETE_CONFIRM_MS = 5000;
@@ -51,6 +52,7 @@ const state = {
   pendingDeleteId: null,
   pendingScenarioRender: false,
   showDiagnostics: false,
+  hostFilter: true,
 
   timerId: 0,
   deleteTimer: 0,
@@ -106,6 +108,8 @@ function cacheDom() {
     'site-status',
     'site-body',
     'scenario-count',
+    'host-filter-toggle',
+    'scenario-filter-hint',
     'scenario-select',
     'scenario-empty',
     'scenario-row',
@@ -156,6 +160,7 @@ function wireStaticEvents() {
   dom.newScenarioForm.addEventListener('submit', onCreateScenario);
   dom.scenarioSelect.addEventListener('change', onScenarioSelectionChange);
   dom.scenarioSelect.addEventListener('blur', onScenarioSelectBlur);
+  dom.hostFilterToggle.addEventListener('click', onHostFilterToggle);
   dom.startRecording.addEventListener('click', (event) =>
     beginSession('recording', /** @type {HTMLButtonElement} */ (event.currentTarget)),
   );
@@ -219,6 +224,7 @@ function applyState(data, { initial = false } = {}) {
       ? state.selectedScenarioId
       : (state.scenarios[0]?.id ?? null);
   persistSelection();
+  ensureSelectionVisible();
 
   renderAll();
 }
@@ -232,6 +238,7 @@ function normalizeScenario(value) {
     createdAt: fallback,
     updatedAt: Number(value.updatedAt) || fallback,
     entryCount: toCount(value.entryCount),
+    hosts: Array.isArray(value.hosts) ? value.hosts.map((host) => String(host)) : [],
   };
 }
 
@@ -530,6 +537,34 @@ function renderSiteCard() {
   body.append(enableButton);
 }
 
+/** @returns {string} the current tab's host, or '' on non-http pages */
+function currentTabHost() {
+  if (!state.currentSite || !isHttpUrl(state.currentSite.url ?? '')) return '';
+  return hostOf(state.currentSite.url);
+}
+
+/** @returns {Scenario[]} scenarios visible under the current host filter */
+function visibleScenarios() {
+  const host = currentTabHost();
+  if (state.hostFilter && host) return filterScenariosByHost(state.scenarios, host);
+  return state.scenarios;
+}
+
+/** Move the selection into the visible set when the filter hides it. */
+function ensureSelectionVisible() {
+  const visible = visibleScenarios();
+  if (visible.some((scenario) => scenario.id === state.selectedScenarioId)) return;
+  state.selectedScenarioId = visible[0]?.id ?? null;
+  persistSelection();
+}
+
+function onHostFilterToggle() {
+  state.hostFilter = !state.hostFilter;
+  ensureSelectionVisible();
+  renderScenarios();
+  renderStart();
+}
+
 function renderScenarios() {
   // Never rebuild the select while the user has it open: it would close the
   // dropdown under their cursor. Re-run the render on blur instead.
@@ -539,7 +574,10 @@ function renderScenarios() {
   }
   state.pendingScenarioRender = false;
 
-  const scenarios = state.scenarios;
+  const host = currentTabHost();
+  const filtering = state.hostFilter && host !== '';
+  const scenarios = filtering ? filterScenariosByHost(state.scenarios, host) : state.scenarios;
+  const total = state.scenarios.length;
   const select = dom.scenarioSelect;
   const hasScenarios = scenarios.length > 0;
 
@@ -553,7 +591,7 @@ function renderScenarios() {
   if (!hasScenarios) {
     const placeholder = document.createElement('option');
     placeholder.value = '';
-    placeholder.textContent = 'No scenarios yet';
+    placeholder.textContent = filtering && total > 0 ? 'No scenarios for this host' : 'No scenarios yet';
     select.append(placeholder);
   } else {
     for (const scenario of scenarios) {
@@ -565,9 +603,30 @@ function renderScenarios() {
     select.value = state.selectedScenarioId ?? '';
   }
   select.disabled = !hasScenarios;
+
   dom.scenarioEmpty.hidden = hasScenarios;
+  dom.scenarioEmpty.textContent =
+    !hasScenarios && filtering && total > 0
+      ? `No scenarios recorded requests on ${host} yet. Create one below, or switch to “All”.`
+      : 'No scenarios yet. Create one below to start recording.';
 
   dom.scenarioCount.textContent = String(scenarios.length);
+  dom.scenarioCount.title = filtering ? `${scenarios.length} of ${total} scenarios` : 'Total scenarios';
+
+  dom.hostFilterToggle.disabled = host === '';
+  dom.hostFilterToggle.title =
+    host === '' ? 'Host filtering needs an http(s) page' : 'Toggle between this host and all scenarios';
+  dom.hostFilterToggle.textContent = state.hostFilter ? 'This host' : 'All';
+  dom.hostFilterToggle.setAttribute('aria-pressed', String(state.hostFilter));
+
+  const hint = filtering && total > 0 && scenarios.length < total;
+  dom.scenarioFilterHint.hidden = !hint;
+  if (hint) {
+    dom.scenarioFilterHint.textContent = `Showing the ${scenarios.length} scenario${
+      scenarios.length === 1 ? '' : 's'
+    } that recorded requests on ${host}. Switch to “All” to see everything.`;
+  }
+
   // Do not destroy a rename form the user is actively typing into.
   if (!isRenameInputFocused()) renderScenarioRow();
 }
@@ -965,7 +1024,7 @@ async function onCreateScenario(event) {
   const button = dom.createScenario;
   setBusy(button, true);
   try {
-    const response = await send(MSG.SCENARIO_CREATE, { name });
+    const response = await send(MSG.SCENARIO_CREATE, { name, host: currentTabHost() || undefined });
     const scenario = response?.scenario ? normalizeScenario(response.scenario) : null;
     if (!scenario) throw new Error('The scenario was created but no scenario data came back.');
 

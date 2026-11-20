@@ -514,6 +514,7 @@ async function main() {
         hasSaveSettings: Boolean(document.querySelector('[data-testid="save-settings"]')),
         hasScenarioList: Boolean(document.querySelector('[data-testid="scenario-list"]')),
         hasDebugReport: Boolean(document.querySelector('[data-testid="copy-debug-report"]')),
+        hasExportAll: Boolean(document.querySelector('[data-testid="export-all-scenarios"]')),
         siteRows: document.querySelectorAll('[data-testid^="remove-site-"]').length,
       }))()`,
     );
@@ -523,6 +524,7 @@ async function main() {
         optionsDom.hasSaveSettings &&
         optionsDom.hasScenarioList &&
         optionsDom.hasDebugReport &&
+        optionsDom.hasExportAll &&
         optionsDom.siteRows === 1,
       JSON.stringify(optionsDom),
     );
@@ -544,10 +546,15 @@ async function main() {
         hasSelect: Boolean(document.querySelector('[data-testid="scenario-select"]')),
         hasStartRecording: Boolean(document.querySelector('[data-testid="start-recording"]')),
         hasStartReplay: Boolean(document.querySelector('[data-testid="start-replay"]')),
+        hasHostFilter: Boolean(document.querySelector('[data-testid="host-filter-toggle"]')),
         hasSettings: Boolean(document.querySelector('[data-testid="open-settings"]')),
       }))()`,
     );
-    check('popup page renders its controls', popupDom.hasSelect && popupDom.hasStartRecording && popupDom.hasStartReplay && popupDom.hasSettings, JSON.stringify(popupDom));
+    check(
+      'popup page renders its controls',
+      popupDom.hasSelect && popupDom.hasStartRecording && popupDom.hasStartReplay && popupDom.hasHostFilter && popupDom.hasSettings,
+      JSON.stringify(popupDom),
+    );
     check('popup page has no uncaught errors', popupErrors.length === 0, popupErrors.join(' | '));
 
     // ---- Baseline: open the fixture page and let it run against the live server.
@@ -575,6 +582,16 @@ async function main() {
     const created = await extensionCall(client, extensionSession, 'scenario.create', { name: 'E2E checkout' });
     check('scenario.create works', created?.ok === true && Boolean(created.scenario?.id), created?.error);
     const scenarioId = created.scenario.id;
+
+    const otherHostCreate = await extensionCall(client, extensionSession, 'scenario.create', {
+      name: 'Other host scenario',
+      host: 'other.example.com',
+    });
+    check(
+      'scenario creation can seed the tab host for the filtered list',
+      otherHostCreate?.scenario?.hosts?.includes('other.example.com') === true,
+      JSON.stringify(otherHostCreate?.scenario),
+    );
 
     const recording = await extensionCall(client, extensionSession, 'session.startRecording', { tabId, scenarioId });
     check('recording started', recording?.ok === true && recording.session?.mode === 'recording', recording?.error);
@@ -652,6 +669,150 @@ async function main() {
     await extensionCall(client, extensionSession, 'session.stop', { tabId });
     const afterStop = await extensionCall(client, extensionSession, 'session.get', { tabId });
     check('recording stops cleanly', afterStop?.ok === true && afterStop.session === null, JSON.stringify(afterStop));
+
+    // ---- Hosts are derived from the recorded requests (drives the popup filter).
+    const hostsAfterRecording = await waitForValue(
+      client,
+      extensionSession,
+      `(async () => {
+        const response = await chrome.runtime.sendMessage({ type: 'state.get', tabId: ${tabId} });
+        const scenario = (response?.scenarios ?? []).find((item) => item.id === ${JSON.stringify(scenarioId)});
+        return scenario && Array.isArray(scenario.hosts) && scenario.hosts.includes('127.0.0.1:${server.port}') ? scenario.hosts : null;
+      })()`,
+      'the scenario hosts to include the recorded site',
+    );
+    check(
+      'scenario hosts are derived from the recorded requests',
+      Array.isArray(hostsAfterRecording) && hostsAfterRecording.includes(`127.0.0.1:${server.port}`),
+      JSON.stringify(hostsAfterRecording),
+    );
+
+    // ---- Import/export round trip.
+    const exportResponse = await extensionCall(client, extensionSession, 'scenario.export', { scenarioId });
+    check(
+      'export includes every recorded request with its response body',
+      exportResponse?.ok === true &&
+        exportResponse?.data?.entries?.length === 4 &&
+        exportResponse.data.entries.every((entry) => typeof entry.body === 'string' && entry.body.length > 0),
+      JSON.stringify(exportResponse?.data?.entries?.map((entry) => ({ method: entry.method, url: entry.url }))),
+    );
+    check(
+      'export document identifies itself',
+      exportResponse?.data?.format === 'api-recorder-scenario' &&
+        exportResponse?.data?.formatVersion === 1 &&
+        typeof exportResponse?.fileName === 'string',
+      JSON.stringify({
+        format: exportResponse?.data?.format,
+        formatVersion: exportResponse?.data?.formatVersion,
+        fileName: exportResponse?.fileName,
+      }),
+    );
+
+    const importedPayload = {
+      ...exportResponse.data,
+      scenario: { ...exportResponse.data.scenario, name: 'E2E imported' },
+    };
+    const importResponse = await extensionCall(client, extensionSession, 'scenario.import', { data: importedPayload });
+    check(
+      'import creates a new scenario with every recorded request',
+      importResponse?.ok === true &&
+        importResponse.imported === 4 &&
+        importResponse.scenarios?.[0]?.name === 'E2E imported',
+      importResponse?.error ?? JSON.stringify(importResponse),
+    );
+    check(
+      'imported scenario inherits hosts from its entries',
+      (importResponse?.scenarios?.[0]?.hosts ?? []).includes(`127.0.0.1:${server.port}`),
+      JSON.stringify(importResponse?.scenarios?.[0]?.hosts),
+    );
+    const importedScenarioId = importResponse.scenarios?.[0]?.id;
+
+    const importedReplay = await extensionCall(client, extensionSession, 'session.startReplay', {
+      tabId,
+      scenarioId: importedScenarioId,
+    });
+    check(
+      'replay works from an imported scenario',
+      importedReplay?.ok === true && importedReplay.session?.mode === 'replay',
+      importedReplay?.error,
+    );
+
+    const hitsBeforeImportedProbe = server.hitsOf('GET', '/api/greeting');
+    await startProbe(client, extensionSession, tabId, 'imported', '/api/greeting');
+    const importedProbe = await waitForProbe(client, extensionSession, tabId, 'imported');
+    const importedBody = probeJson(importedProbe);
+    check(
+      'imported recording replays without touching the server',
+      importedProbe.status === 200 &&
+        importedBody?.version === 'v1' &&
+        server.hitsOf('GET', '/api/greeting') === hitsBeforeImportedProbe,
+      JSON.stringify({ status: importedProbe.status, body: importedBody }),
+    );
+    await extensionCall(client, extensionSession, 'session.stop', { tabId });
+
+    const invalidImport = await extensionCall(client, extensionSession, 'scenario.import', {
+      data: { hello: 'world' },
+    });
+    check(
+      'invalid import files are rejected with an explanation',
+      invalidImport?.ok === false && typeof invalidImport.error === 'string',
+      invalidImport?.error,
+    );
+
+    // ---- Export all / bulk import round trip.
+    const exportAllResponse = await extensionCall(client, extensionSession, 'scenario.exportAll');
+    check(
+      'export all produces a self-describing collection document',
+      exportAllResponse?.ok === true &&
+        exportAllResponse.data?.format === 'api-recorder-scenarios' &&
+        exportAllResponse.data?.formatVersion === 1 &&
+        typeof exportAllResponse?.fileName === 'string',
+      JSON.stringify({
+        format: exportAllResponse?.data?.format,
+        formatVersion: exportAllResponse?.data?.formatVersion,
+        fileName: exportAllResponse?.fileName,
+        error: exportAllResponse?.error,
+      }),
+    );
+    check(
+      'export all includes every scenario that has recorded requests',
+      exportAllResponse?.data?.scenarios?.length === 2 &&
+        exportAllResponse.data.scenarios.every(
+          (section) => Array.isArray(section.entries) && section.entries.length === 4,
+        ),
+      JSON.stringify(
+        exportAllResponse?.data?.scenarios?.map((section) => ({
+          name: section.scenario?.name,
+          entries: section.entries?.length,
+        })),
+      ),
+    );
+
+    const bulkPayload = {
+      ...exportAllResponse.data,
+      scenarios: exportAllResponse.data.scenarios.map((section) => ({
+        ...section,
+        scenario: { ...section.scenario, name: `Bulk ${section.scenario.name}` },
+      })),
+    };
+    const bulkImportResponse = await extensionCall(client, extensionSession, 'scenario.import', {
+      data: bulkPayload,
+    });
+    check(
+      'bulk import creates one scenario per exported section',
+      bulkImportResponse?.ok === true &&
+        bulkImportResponse.imported === 8 &&
+        bulkImportResponse.scenarios?.length === 2,
+      bulkImportResponse?.error ?? JSON.stringify(bulkImportResponse),
+    );
+    check(
+      'bulk imported scenarios carry their entries and hosts',
+      (bulkImportResponse?.scenarios ?? []).every(
+        (scenario) =>
+          scenario.entryCount === 4 && (scenario.hosts ?? []).includes(`127.0.0.1:${server.port}`),
+      ),
+      JSON.stringify(bulkImportResponse?.scenarios),
+    );
 
     // ---- Payload editor: edit a recorded response through the Settings UI.
     await reloadExtensionPage(client, extensionSession);

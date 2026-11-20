@@ -9,7 +9,15 @@ import { base64ToBytes, bytesToBase64, bytesToUtf8, looksLikeText, utf8ToBytes }
 import { buildEditedEntry, summarizeEntry } from '../shared/entryBody.js';
 import { isHttpUrl } from '../shared/url.js';
 import { patternForTabUrl } from '../shared/patterns.js';
-import { newScenario, normalizeScenarioName } from '../shared/scenarios.js';
+import { newScenario, newScenarioId, normalizeScenarioName } from '../shared/scenarios.js';
+import { collectEntryHosts, sanitizeHosts } from '../shared/scenarioHosts.js';
+import {
+  buildCollectionExportDocument,
+  buildExportDocument,
+  normalizeImportedScenarios,
+  scenarioFileSlug,
+  uniqueImportedName,
+} from '../shared/scenarioTransfer.js';
 import * as db from './db.js';
 import * as sessions from './sessions.js';
 import * as sites from './sites.js';
@@ -139,6 +147,10 @@ async function dispatch(message, sender) {
       const scenarios = await store.getScenarios();
       ensureUniqueName(scenarios, name);
       const scenario = newScenario(name);
+      // Seed the current tab's host so a brand-new scenario shows up in the
+      // popup's host-filtered list before it has captured anything.
+      const seedHosts = sanitizeHosts([typeof message.host === 'string' ? message.host : '']);
+      if (seedHosts.length > 0) scenario.hosts = seedHosts;
       scenarios.push(scenario);
       await store.setScenarios(scenarios);
       return { ok: true, scenario, scenarios: await listScenariosWithCounts() };
@@ -235,6 +247,117 @@ async function dispatch(message, sender) {
       });
       await sessions.refreshScenarioData(scenarioId);
       return { ok: true, entry: summarizeEntry(editedEntry), hasOriginal };
+    }
+
+    case MSG.EXPORT_SCENARIO: {
+      const scenarioId = requireString(message.scenarioId, 'Missing scenario id.');
+      const scenario = (await store.getScenarios()).find((item) => item.id === scenarioId);
+      if (!scenario) throw new Error('That scenario no longer exists.');
+
+      const entries = await db.listEntries(scenarioId);
+      if (entries.length === 0) throw new Error('This scenario has no recorded requests to export.');
+
+      const bodiesById = {};
+      for (const entry of entries) {
+        bodiesById[entry.id] = (await db.getBody(entry.id)) ?? { id: entry.id, body: '' };
+      }
+
+      const data = buildExportDocument({
+        scenario,
+        entries,
+        bodiesById,
+        exportedAt: Date.now(),
+        extensionVersion: chrome.runtime.getManifest().version,
+      });
+      const fileName = `api-recorder-scenario-${scenarioFileSlug(scenario.name)}-${new Date()
+        .toISOString()
+        .slice(0, 10)}.json`;
+      return { ok: true, fileName, data };
+    }
+
+    case MSG.EXPORT_ALL_SCENARIOS: {
+      const scenarios = await store.getScenarios();
+      const entriesById = {};
+      const bodiesById = {};
+      const withEntries = [];
+
+      for (const scenario of scenarios) {
+        const entries = await db.listEntries(scenario.id);
+        if (entries.length === 0) continue;
+        entriesById[scenario.id] = entries;
+        for (const entry of entries) {
+          bodiesById[entry.id] = (await db.getBody(entry.id)) ?? { id: entry.id, body: '' };
+        }
+        withEntries.push(scenario);
+      }
+
+      if (withEntries.length === 0) {
+        throw new Error('There are no scenarios with recorded requests to export.');
+      }
+
+      const data = buildCollectionExportDocument({
+        scenarios: withEntries,
+        entriesById,
+        bodiesById,
+        exportedAt: Date.now(),
+        extensionVersion: chrome.runtime.getManifest().version,
+      });
+      const fileName = `api-recorder-scenarios-${new Date().toISOString().slice(0, 10)}.json`;
+      return { ok: true, fileName, data, scenarioCount: withEntries.length };
+    }
+
+    case MSG.IMPORT_SCENARIO: {
+      const settings = await store.getSettings();
+      const sections = normalizeImportedScenarios(message.data, {
+        now: Date.now(),
+        maxBodyBytes: settings.maxBodyBytes,
+      });
+
+      const scenarios = await store.getScenarios();
+      const importedSummaries = [];
+      let importedTotal = 0;
+      let skippedTotal = 0;
+
+      for (const section of sections) {
+        if (section.records.length === 0) {
+          skippedTotal += Math.max(section.skipped.length, 1);
+          continue;
+        }
+
+        const name = uniqueImportedName(
+          section.name,
+          scenarios.map((item) => item.name),
+        );
+        const id = newScenarioId();
+        const records = section.records.map(({ entry, body, originalBody }) => ({
+          entry: { ...entry, id: db.entryId(id, entry.matchKey), scenarioId: id },
+          body,
+          originalBody,
+        }));
+        await db.saveEntriesBulk(records);
+
+        const scenarioMeta = {
+          id,
+          name,
+          createdAt: section.createdAt,
+          updatedAt: section.updatedAt,
+          hosts: collectEntryHosts(records.map((record) => record.entry)),
+        };
+        scenarios.push(scenarioMeta);
+        importedSummaries.push({ ...scenarioMeta, entryCount: records.length });
+        importedTotal += records.length;
+        skippedTotal += section.skipped.length;
+      }
+
+      if (importedTotal === 0) {
+        const firstReason =
+          sections.flatMap((section) => section.skipped).map((skip) => skip.reason)[0] ??
+          'the file has no valid recorded requests.';
+        throw new Error(`Nothing could be imported: ${firstReason}`);
+      }
+
+      await store.setScenarios(scenarios);
+      return { ok: true, scenarios: importedSummaries, imported: importedTotal, skipped: skippedTotal };
     }
 
     case MSG.SETTINGS_SET: {
@@ -402,12 +525,29 @@ async function buildState(tabId) {
 
 async function listScenariosWithCounts() {
   const scenarios = await store.getScenarios();
-  return Promise.all(
-    scenarios.map(async (scenario) => ({
-      ...scenario,
-      entryCount: await db.countEntries(scenario.id),
-    })),
+  let hostsChanged = false;
+
+  const withCounts = await Promise.all(
+    scenarios.map(async (scenario) => {
+      const entryCount = await db.countEntries(scenario.id);
+      let hosts = scenario.hosts ?? [];
+      // Backfill scenarios recorded before host tracking existed.
+      if (entryCount > 0 && hosts.length === 0) {
+        const entries = await db.listEntries(scenario.id);
+        hosts = collectEntryHosts(entries);
+        scenario.hosts = hosts;
+        hostsChanged = true;
+      }
+      return { ...scenario, entryCount, hosts };
+    }),
   );
+
+  if (hostsChanged) {
+    await store.setScenarios(
+      withCounts.map(({ id, name, createdAt, updatedAt, hosts }) => ({ id, name, createdAt, updatedAt, hosts })),
+    );
+  }
+  return withCounts;
 }
 
 /** @param {number} tabId */

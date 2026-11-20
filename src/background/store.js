@@ -4,6 +4,7 @@
  * chrome.storage.session so a restarted service worker can recover them.
  */
 import { DEFAULT_SETTINGS, STORAGE } from '../shared/constants.js';
+import { sanitizeHosts } from '../shared/scenarioHosts.js';
 
 /**
  * @template T
@@ -47,6 +48,7 @@ function normalizeScenario(value) {
     name: String(value.name),
     createdAt: Number(value.createdAt) || 0,
     updatedAt: Number(value.updatedAt) || Number(value.createdAt) || 0,
+    hosts: sanitizeHosts(value?.hosts),
   };
 }
 
@@ -57,6 +59,27 @@ export async function getScenarios() {
   return value
     .filter((scenario) => scenario && typeof scenario.id === 'string' && typeof scenario.name === 'string')
     .map(normalizeScenario);
+}
+
+/**
+ * Add hosts to a scenario's metadata (as recordings are captured / imported).
+ * @param {string} scenarioId
+ * @param {string[]} newHosts
+ * @returns {Promise<object|null>} the updated scenario or null when it is gone
+ */
+export async function addScenarioHosts(scenarioId, newHosts) {
+  const scenarios = await getScenarios();
+  const scenario = scenarios.find((item) => item.id === scenarioId);
+  if (!scenario) return null;
+
+  const merged = sanitizeHosts([...(scenario.hosts ?? []), ...(Array.isArray(newHosts) ? newHosts : [])]);
+  const current = scenario.hosts ?? [];
+  const unchanged = merged.length === current.length && merged.every((host, index) => host === current[index]);
+  if (unchanged) return scenario;
+
+  scenario.hosts = merged;
+  await setScenarios(scenarios);
+  return scenario;
 }
 
 /** @param {Array<{id:string,name:string,createdAt:number,updatedAt:number}>} scenarios */
