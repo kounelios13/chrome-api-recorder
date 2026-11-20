@@ -668,6 +668,61 @@ async function main() {
       `Boolean(document.querySelector('[data-testid="edit-entry-${greetingEntry.id}"]'))`,
       'the recorded request list with edit buttons',
     );
+
+    // ---- Filter box in the recorded request list.
+    await evaluate(
+      client,
+      extensionSession,
+      `(() => {
+        const input = document.querySelector('[data-testid="entries-filter"]');
+        input.value = 'post /api/echo';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`,
+    );
+    await waitForValue(
+      client,
+      extensionSession,
+      `document.querySelectorAll('#entries-body tr').length === 2`,
+      'the request filter to narrow the list',
+    );
+    const filteredEntries = await evaluate(
+      client,
+      extensionSession,
+      `(() => ({
+        rows: document.querySelectorAll('#entries-body tr').length,
+        showsGreeting: Boolean(document.querySelector('[data-testid="edit-entry-${greetingEntry.id}"]')),
+        count: String(document.querySelector('[data-testid="entries-filter-count"]').textContent ?? ''),
+      }))()`,
+    );
+    check(
+      'request filter narrows the recorded request list by method and URL',
+      filteredEntries.rows === 2 && filteredEntries.showsGreeting === false && /2 of 4/.test(filteredEntries.count),
+      JSON.stringify(filteredEntries),
+    );
+
+    await clickInPage(client, extensionSession, '[data-testid="entries-filter-clear"]');
+    await waitForValue(
+      client,
+      extensionSession,
+      `document.querySelectorAll('#entries-body tr').length === 4 &&
+        Boolean(document.querySelector('[data-testid="edit-entry-${greetingEntry.id}"]'))`,
+      'the cleared filter to restore all requests',
+    );
+    const clearedEntries = await evaluate(
+      client,
+      extensionSession,
+      `(() => ({
+        rows: document.querySelectorAll('#entries-body tr').length,
+        count: String(document.querySelector('[data-testid="entries-filter-count"]').textContent ?? ''),
+      }))()`,
+    );
+    check(
+      'clearing the request filter restores every recorded request',
+      clearedEntries.rows === 4 && /4 requests?/.test(clearedEntries.count),
+      JSON.stringify(clearedEntries),
+    );
+
     await clickInPage(client, extensionSession, `[data-testid="edit-entry-${greetingEntry.id}"]`);
     await waitForDialogOpen(client, extensionSession);
     if (process.env.E2E_SCREENSHOT) {

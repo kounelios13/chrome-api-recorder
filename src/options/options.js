@@ -11,6 +11,7 @@ import { onBroadcast, send } from '../shared/messages.js';
 import { normalizeSiteInput } from '../shared/patterns.js';
 import { shortUrl } from '../shared/url.js';
 import { normalizeScenarioName } from '../shared/scenarios.js';
+import { filterEntries } from '../shared/filterEntries.js';
 
 const MB = 1024 * 1024;
 const MIN_MB = 0.01;
@@ -44,6 +45,7 @@ const state = {
   /** @type {any[]} */
   entries: [],
   entriesTotal: 0,
+  entriesFilter: '',
   /** @type {null|{scenarioId:string, entry:any, payload:any, editable:boolean, hasOriginal:boolean}} */
   editing: null,
   statusTimer: 0,
@@ -170,6 +172,9 @@ function cacheDom() {
     'entries-close',
     'entries-body',
     'entries-empty',
+    'entries-filter',
+    'entries-filter-clear',
+    'entries-filter-count',
     'footer-version',
     'copy-debug-report',
     'entry-editor',
@@ -206,6 +211,14 @@ function wireEvents() {
   dom.settingsForm.addEventListener('submit', onSaveSettings);
   dom.resetSettings.addEventListener('click', onResetSettings);
   dom.entriesClose.addEventListener('click', closeEntries);
+  dom.entriesFilter.addEventListener('input', onEntriesFilterInput);
+  dom.entriesFilter.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      clearEntriesFilter();
+    }
+  });
+  dom.entriesFilterClear.addEventListener('click', clearEntriesFilter);
 
   dom.entryEditorForm.addEventListener('submit', onSavePayload);
   dom.entryEditorClose.addEventListener('click', closeEditor);
@@ -790,6 +803,8 @@ async function viewEntries(scenario, button) {
     const total = Number(response?.total);
     const entryCount = Number.isFinite(total) && total >= 0 ? total : scenario.entryCount;
     state.entriesScenarioId = scenario.id;
+    state.entriesFilter = '';
+    dom.entriesFilter.value = '';
     if (entryCount !== scenario.entryCount) {
       state.scenarios = state.scenarios.map((item) =>
         item.id === scenario.id ? { ...item, entryCount } : item,
@@ -815,13 +830,49 @@ function renderEntries(scenario, entries, total) {
   state.entriesScenario = scenario;
   state.entries = entries;
   state.entriesTotal = total;
-  dom.entriesTitle.textContent = `Requests in “${scenario.name}” — ${entries.length} of ${total}`;
-  dom.entriesBody.replaceChildren();
-  dom.entriesEmpty.hidden = entries.length > 0;
+  renderEntryRows();
+}
 
-  for (const entry of entries) {
+/** Re-render the table rows for the current filter (keeps the input focused). */
+function renderEntryRows() {
+  const loaded = state.entries.length;
+  const query = state.entriesFilter.trim();
+  const rows = filterEntries(state.entries, query);
+  const scenario = state.entriesScenario;
+
+  dom.entriesBody.replaceChildren();
+  for (const entry of rows) {
     dom.entriesBody.append(renderEntryRow(entry));
   }
+
+  dom.entriesEmpty.hidden = rows.length > 0;
+  dom.entriesEmpty.textContent =
+    loaded === 0 ? 'No requests recorded in this scenario yet.' : 'No recorded requests match this filter.';
+
+  const base = scenario ? `Requests in “${scenario.name}”` : 'Recorded requests';
+  if (query) {
+    dom.entriesTitle.textContent = `${base} — ${rows.length} of ${loaded} match “${query}”`;
+  } else {
+    dom.entriesTitle.textContent = `${base} — ${loaded} request${loaded === 1 ? '' : 's'}`;
+  }
+
+  dom.entriesFilterClear.hidden = query.length === 0;
+  dom.entriesFilterCount.textContent = query
+    ? `${rows.length} of ${loaded} match`
+    : `${loaded} request${loaded === 1 ? '' : 's'}`;
+}
+
+/** @param {Event} event */
+function onEntriesFilterInput(event) {
+  state.entriesFilter = event.currentTarget.value;
+  renderEntryRows();
+}
+
+function clearEntriesFilter() {
+  state.entriesFilter = '';
+  dom.entriesFilter.value = '';
+  renderEntryRows();
+  dom.entriesFilter.focus();
 }
 
 /** @param {any} entry */
@@ -883,6 +934,10 @@ function closeEntries() {
   state.entriesScenario = null;
   state.entries = [];
   state.entriesTotal = 0;
+  state.entriesFilter = '';
+  dom.entriesFilter.value = '';
+  dom.entriesFilterCount.textContent = '';
+  dom.entriesFilterClear.hidden = true;
   dom.entriesPanel.hidden = true;
   dom.entriesBody.replaceChildren();
   dom.entriesEmpty.hidden = true;

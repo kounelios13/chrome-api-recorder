@@ -1,6 +1,6 @@
 {
   "name": "api-recorder-extension",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "description": "Chrome MV3 extension that records XHR/fetch responses and replays them per request body.",
   "type": "module",

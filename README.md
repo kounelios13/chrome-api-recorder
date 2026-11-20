@@ -27,6 +27,9 @@ fulfills requests at the network layer, so no page-side monkey-patching is invol
   **Edit** button that opens the response payload in a dialog. Edit and save it to test different
   response shapes; the original payload is kept and can be restored with one click. Replay picks up
   edits immediately, even while a replay session is active.
+- **Request filter** — the recorded-request table has a live filter box: type `post /api/orders`,
+  `200`, `json`, a URL fragment or a body token to narrow the list before previewing or editing.
+  Multiple space-separated terms must all match.
 
   ![Payload editor dialog](docs/payload-editor.png)
 - **Per-tab sessions** — a tab can record while another tab replays. A session survives page reloads
@@ -65,9 +68,10 @@ per site, the first time you add it.
 5. Select the scenario and press **Start replay**, then reload/interact with the page. Matching
    requests are served from the recording (no server hit); everything else goes live.
 6. Press **Go live** in the HUD (or popup) to bypass the recording, and **Resume replay** to return.
-7. To test a different response, open **Settings → Scenarios → View requests**, press **Edit** next
-   to a request, change the payload and press **Save payload**. Replay now serves the edited body;
-   **Restore original** brings the recorded body back.
+7. To test a different response, open **Settings → Scenarios → View requests**, use the filter box
+   (e.g. `post /api/orders`) to find the request, press **Edit** next to it, change the payload and
+   press **Save payload**. Replay now serves the edited body; **Restore original** brings the recorded
+   body back.
 
 ## How it works
 
@@ -197,7 +201,7 @@ and options pages load without uncaught errors. The payload editor is exercised 
 Settings UI: the recorded response is edited, replay serves the edited bytes, the original is restored
 from the dialog, and the next replay serves the original again. Smart fallback is covered as well:
 an ambiguous request is left live while an unambiguous URL/path match is replayed from storage, and
-the popup/debug-report diagnostics are validated (65 checks).
+the popup/debug-report diagnostics are validated (67 checks).
 
 ## License
 

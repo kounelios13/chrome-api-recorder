@@ -1080,3 +1080,32 @@ code {
 .modal-spacer {
   flex: 1 1 auto;
 }
+
+
+/* ------------------------------------------------------------------ */
+/* Recorded request filter                                             */
+/* ------------------------------------------------------------------ */
+
+.entries-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.entries-filter {
+  flex: 1;
+  min-width: 0;
+}
+
+.entries-filter-clear {
+  flex: none;
+}
+
+.entries-filter-count {
+  flex: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
