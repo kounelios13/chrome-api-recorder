@@ -12,6 +12,11 @@ import { normalizeSiteInput } from '../shared/patterns.js';
 import { shortUrl } from '../shared/url.js';
 import { normalizeScenarioName } from '../shared/scenarios.js';
 import { filterEntries } from '../shared/filterEntries.js';
+import {
+  collectSuggestedTargetOrigins,
+  defaultCopyScenarioName,
+  normalizeTargetOrigin,
+} from '../shared/scenarioCopy.js';
 import { scenarioFileSlug } from '../shared/scenarioTransfer.js';
 
 const MB = 1024 * 1024;
@@ -51,6 +56,15 @@ const state = {
   entriesFilter: '',
   /** @type {null|{scenarioId:string, entry:any, payload:any, editable:boolean, hasOriginal:boolean}} */
   editing: null,
+  /** @type {Scenario|null} */
+  copyingScenario: null,
+  copyNameDirty: false,
+  /** @type {string[]} */
+  copyOriginSuggestions: [],
+  /** @type {string[]} */
+  copyOriginFiltered: [],
+  copyOriginOpen: false,
+  copyOriginActiveIndex: -1,
   statusTimer: 0,
   savedTimer: 0,
   unsubscribe: null,
@@ -198,6 +212,19 @@ function cacheDom() {
     'entry-editor-restore',
     'entry-editor-save',
     'payload-editor',
+    'copy-scenario-dialog',
+    'copy-scenario-form',
+    'copy-scenario-meta',
+    'copy-scenario-close',
+    'copy-scenario-cancel',
+    'copy-scenario-submit',
+    'copy-target-origin-combobox',
+    'copy-target-origin',
+    'copy-target-origin-toggle',
+    'copy-target-origin-list',
+    'copy-scenario-name',
+    'copy-rewrite-headers',
+    'copy-scenario-error',
   ];
   for (const id of ids) {
     const element = document.getElementById(id);
@@ -244,6 +271,47 @@ function wireEvents() {
   });
   dom.entryEditor.addEventListener('click', (event) => {
     if (event.target === dom.entryEditor) closeEditor();
+  });
+
+  dom.copyScenarioForm.addEventListener('submit', onCopyScenarioSubmit);
+  dom.copyScenarioClose.addEventListener('click', closeCopyDialog);
+  dom.copyScenarioCancel.addEventListener('click', closeCopyDialog);
+  dom.copyTargetOrigin.addEventListener('input', onCopyTargetOriginInput);
+  dom.copyTargetOrigin.addEventListener('click', () => openCopyOriginMenu({ showAll: false }));
+  dom.copyTargetOrigin.addEventListener('keydown', onCopyTargetOriginKeydown);
+  dom.copyTargetOriginToggle.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    if (state.copyOriginOpen) {
+      closeCopyOriginMenu();
+    } else {
+      dom.copyTargetOrigin.focus();
+      openCopyOriginMenu({ showAll: true });
+    }
+  });
+  dom.copyTargetOriginList.addEventListener('mousedown', (event) => {
+    const option = event.target instanceof Element ? event.target.closest('[role="option"]') : null;
+    if (!option) return;
+    event.preventDefault();
+    selectCopyOriginSuggestion(option.getAttribute('data-value') ?? '');
+  });
+  dom.copyScenarioName.addEventListener('input', () => {
+    state.copyNameDirty = true;
+    hideFieldError(dom.copyScenarioError);
+  });
+  dom.copyScenarioDialog.addEventListener('close', () => {
+    state.copyingScenario = null;
+    state.copyNameDirty = false;
+    closeCopyOriginMenu();
+    hideFieldError(dom.copyScenarioError);
+  });
+  dom.copyScenarioDialog.addEventListener('click', (event) => {
+    if (event.target === dom.copyScenarioDialog) {
+      closeCopyDialog();
+      return;
+    }
+    if (state.copyOriginOpen && event.target instanceof Node && !dom.copyTargetOriginCombobox.contains(event.target)) {
+      closeCopyOriginMenu();
+    }
   });
 }
 
@@ -742,6 +810,19 @@ function renderScenarioRow(scenario) {
   );
   renameButton.addEventListener('click', () => beginRename(scenario));
 
+  const copyButton = el(
+    'button',
+    {
+      class: 'btn btn-ghost btn-sm',
+      type: 'button',
+      'data-testid': `copy-scenario-${scenario.id}`,
+      'aria-label': `Copy scenario ${scenario.name} to another host`,
+      title: 'Copy all requests in this scenario to a different target origin',
+    },
+    'Copy to host…',
+  );
+  copyButton.addEventListener('click', () => openCopyDialog(scenario));
+
   const exportButton = el(
     'button',
     {
@@ -767,9 +848,250 @@ function renderScenarioRow(scenario) {
   );
   deleteButton.addEventListener('click', () => onDeleteClicked(scenario, deleteButton));
 
-  const actions = el('div', { class: 'scenario-actions' }, exportButton, viewButton, renameButton, deleteButton);
+  const actions = el(
+    'div',
+    { class: 'scenario-actions' },
+    copyButton,
+    exportButton,
+    viewButton,
+    renameButton,
+    deleteButton,
+  );
   row.append(main, actions);
   return row;
+}
+
+/** @param {Scenario} scenario */
+function openCopyDialog(scenario) {
+  hideError();
+  hideFieldError(dom.copyScenarioError);
+  state.copyingScenario = scenario;
+  state.copyNameDirty = false;
+
+  const count = scenario.entryCount;
+  const hostList = scenario.hosts ?? [];
+  dom.copyScenarioMeta.textContent = [
+    `Source: ${scenario.name}`,
+    `${count} request${count === 1 ? '' : 's'}`,
+    hostList.length > 0 ? `hosts: ${hostList.join(', ')}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  state.copyOriginSuggestions = collectSuggestedTargetOrigins({
+    sites: state.sites,
+    scenarios: state.scenarios,
+  });
+  dom.copyTargetOriginToggle.hidden = state.copyOriginSuggestions.length === 0;
+  dom.copyTargetOrigin.value = '';
+  dom.copyScenarioName.value = defaultCopyScenarioName(scenario.name, '');
+  dom.copyRewriteHeaders.checked = true;
+  closeCopyOriginMenu();
+
+  if (typeof dom.copyScenarioDialog.showModal === 'function') {
+    if (!dom.copyScenarioDialog.open) dom.copyScenarioDialog.showModal();
+  } else {
+    dom.copyScenarioDialog.setAttribute('open', '');
+  }
+  dom.copyTargetOrigin.focus();
+}
+
+/** @param {{ showAll?: boolean }} [options] */
+function openCopyOriginMenu({ showAll = false } = {}) {
+  const query = showAll ? '' : dom.copyTargetOrigin.value.trim().toLowerCase();
+  const filtered = query
+    ? state.copyOriginSuggestions.filter((origin) => origin.toLowerCase().includes(query))
+    : state.copyOriginSuggestions;
+
+  state.copyOriginFiltered = filtered;
+  state.copyOriginActiveIndex = -1;
+
+  if (filtered.length === 0) {
+    closeCopyOriginMenu();
+    return;
+  }
+
+  dom.copyTargetOriginList.replaceChildren(
+    ...filtered.map((origin, index) =>
+      el(
+        'li',
+        {
+          id: `copy-target-origin-option-${index}`,
+          class: 'combobox-option',
+          role: 'option',
+          'aria-selected': 'false',
+          'data-value': origin,
+          'data-testid': 'copy-target-origin-option',
+          title: origin,
+        },
+        origin,
+      ),
+    ),
+  );
+  state.copyOriginOpen = true;
+  dom.copyTargetOriginList.hidden = false;
+  dom.copyTargetOrigin.setAttribute('aria-expanded', 'true');
+  dom.copyTargetOrigin.removeAttribute('aria-activedescendant');
+  dom.copyTargetOriginToggle.setAttribute('aria-expanded', 'true');
+}
+
+function closeCopyOriginMenu() {
+  state.copyOriginOpen = false;
+  state.copyOriginFiltered = [];
+  state.copyOriginActiveIndex = -1;
+  dom.copyTargetOriginList.hidden = true;
+  dom.copyTargetOrigin.setAttribute('aria-expanded', 'false');
+  dom.copyTargetOrigin.removeAttribute('aria-activedescendant');
+  dom.copyTargetOriginToggle.setAttribute('aria-expanded', 'false');
+}
+
+/** @param {number} nextIndex */
+function setCopyOriginActiveIndex(nextIndex) {
+  const options = dom.copyTargetOriginList.children;
+  if (options.length === 0) return;
+
+  if (state.copyOriginActiveIndex >= 0 && options[state.copyOriginActiveIndex]) {
+    options[state.copyOriginActiveIndex].setAttribute('aria-selected', 'false');
+  }
+  state.copyOriginActiveIndex = nextIndex;
+  const active = options[nextIndex];
+  if (active) {
+    active.setAttribute('aria-selected', 'true');
+    dom.copyTargetOrigin.setAttribute('aria-activedescendant', active.id);
+    if (typeof active.scrollIntoView === 'function') {
+      active.scrollIntoView({ block: 'nearest' });
+    }
+  } else {
+    dom.copyTargetOrigin.removeAttribute('aria-activedescendant');
+  }
+}
+
+/** @param {string} origin */
+function selectCopyOriginSuggestion(origin) {
+  dom.copyTargetOrigin.value = origin;
+  updateCopyScenarioNameFromOrigin();
+  dom.copyTargetOrigin.focus();
+  closeCopyOriginMenu();
+}
+
+/** @param {KeyboardEvent} event */
+function onCopyTargetOriginKeydown(event) {
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    if (!state.copyOriginOpen) {
+      openCopyOriginMenu({ showAll: false });
+      if (state.copyOriginFiltered.length > 0) setCopyOriginActiveIndex(0);
+      return;
+    }
+    const next = (state.copyOriginActiveIndex + 1) % state.copyOriginFiltered.length;
+    setCopyOriginActiveIndex(next);
+  } else if (event.key === 'ArrowUp') {
+    if (!state.copyOriginOpen) return;
+    event.preventDefault();
+    const len = state.copyOriginFiltered.length;
+    const next = state.copyOriginActiveIndex <= 0 ? len - 1 : state.copyOriginActiveIndex - 1;
+    setCopyOriginActiveIndex(next);
+  } else if (event.key === 'Enter') {
+    if (state.copyOriginOpen && state.copyOriginActiveIndex >= 0) {
+      event.preventDefault();
+      selectCopyOriginSuggestion(state.copyOriginFiltered[state.copyOriginActiveIndex]);
+    }
+  } else if (event.key === 'Escape') {
+    if (state.copyOriginOpen) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeCopyOriginMenu();
+    }
+  } else if (event.key === 'Tab') {
+    closeCopyOriginMenu();
+  }
+}
+
+function closeCopyDialog() {
+  closeCopyOriginMenu();
+  if (typeof dom.copyScenarioDialog.close === 'function') {
+    if (dom.copyScenarioDialog.open) dom.copyScenarioDialog.close();
+  } else {
+    dom.copyScenarioDialog.removeAttribute('open');
+  }
+  state.copyingScenario = null;
+  state.copyNameDirty = false;
+  hideFieldError(dom.copyScenarioError);
+}
+
+function updateCopyScenarioNameFromOrigin() {
+  hideFieldError(dom.copyScenarioError);
+  if (!state.copyingScenario || state.copyNameDirty) return;
+  try {
+    const { host } = normalizeTargetOrigin(dom.copyTargetOrigin.value);
+    dom.copyScenarioName.value = defaultCopyScenarioName(state.copyingScenario.name, host);
+  } catch {
+    dom.copyScenarioName.value = defaultCopyScenarioName(state.copyingScenario.name, '');
+  }
+}
+
+function onCopyTargetOriginInput() {
+  updateCopyScenarioNameFromOrigin();
+  openCopyOriginMenu({ showAll: false });
+}
+
+/** @param {Event} event */
+async function onCopyScenarioSubmit(event) {
+  event.preventDefault();
+  const source = state.copyingScenario;
+  if (!source) return;
+
+  hideError();
+  hideFieldError(dom.copyScenarioError);
+
+  let target;
+  try {
+    target = normalizeTargetOrigin(dom.copyTargetOrigin.value);
+  } catch (error) {
+    showFieldError(dom.copyScenarioError, errorMessage(error, 'Enter a valid target origin.'));
+    dom.copyTargetOrigin.focus();
+    return;
+  }
+
+  let name;
+  try {
+    name = normalizeScenarioName(dom.copyScenarioName.value);
+  } catch (error) {
+    showFieldError(dom.copyScenarioError, errorMessage(error, 'Give the new scenario a name.'));
+    dom.copyScenarioName.focus();
+    return;
+  }
+
+  setBusy(dom.copyScenarioSubmit, true);
+  try {
+    const response = await send(MSG.SCENARIO_COPY, {
+      scenarioId: source.id,
+      name,
+      targetOrigin: target.origin,
+      rewriteHeaders: dom.copyRewriteHeaders.checked,
+    });
+    if (Array.isArray(response?.scenarios)) {
+      state.scenarios = normalizeScenarios(response.scenarios);
+    } else if (response?.scenario) {
+      state.scenarios = [...state.scenarios, ...normalizeScenarios([response.scenario])];
+    }
+    renderScenarios();
+    closeCopyDialog();
+
+    const copiedCount = toCount(response?.copiedCount);
+    const fallbackCount = toCount(response?.fallbackCount);
+    const fallbackNote =
+      fallbackCount > 0
+        ? ` ${fallbackCount} request${fallbackCount === 1 ? '' : 's'} with a request body will match via smart fallback on replay.`
+        : '';
+    showStatus(
+      `Copied “${name}” to ${target.host} (${copiedCount} request${copiedCount === 1 ? '' : 's'}).${fallbackNote}`,
+    );
+  } catch (error) {
+    showFieldError(dom.copyScenarioError, errorMessage(error, 'Could not copy the scenario.'));
+  } finally {
+    setBusy(dom.copyScenarioSubmit, false);
+  }
 }
 
 /** @param {Scenario} scenario */

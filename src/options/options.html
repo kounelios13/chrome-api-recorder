@@ -374,6 +374,116 @@
       </form>
     </dialog>
 
+    <dialog
+      id="copy-scenario-dialog"
+      class="modal modal-sm"
+      data-testid="copy-scenario-dialog"
+      aria-labelledby="copy-scenario-title"
+    >
+      <form id="copy-scenario-form" class="modal-card" autocomplete="off" novalidate>
+        <div class="modal-head">
+          <div class="modal-head-copy">
+            <h2 id="copy-scenario-title" class="modal-title">Copy scenario to host</h2>
+            <p id="copy-scenario-meta" class="modal-meta" data-testid="copy-scenario-meta"></p>
+          </div>
+          <button
+            id="copy-scenario-close"
+            class="btn btn-ghost btn-sm"
+            type="button"
+            aria-label="Close copy scenario dialog"
+          >
+            Close
+          </button>
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="copy-target-origin">Target origin</label>
+          <div id="copy-target-origin-combobox" class="combobox">
+            <input
+              id="copy-target-origin"
+              class="input input-full combobox-input"
+              type="text"
+              inputmode="url"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded="false"
+              aria-controls="copy-target-origin-list"
+              autocomplete="off"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              placeholder="http://localhost:3000 or https://staging.example.com"
+              data-testid="copy-target-origin"
+            />
+            <button
+              id="copy-target-origin-toggle"
+              class="combobox-toggle"
+              type="button"
+              tabindex="-1"
+              aria-label="Toggle known hosts"
+              aria-expanded="false"
+              aria-controls="copy-target-origin-list"
+              data-testid="copy-target-origin-toggle"
+            >
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
+                <path
+                  d="M4 6l4 4 4-4"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+            <ul
+              id="copy-target-origin-list"
+              class="combobox-menu"
+              role="listbox"
+              aria-label="Known target origins"
+              data-testid="copy-target-origin-list"
+              hidden
+            ></ul>
+          </div>
+          <p class="field-hint">
+            Pick a known host or enter any custom origin. Every request in this scenario will be rewritten to this
+            origin (keeping path, query, and response bodies).
+          </p>
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="copy-scenario-name">New scenario name</label>
+          <input
+            id="copy-scenario-name"
+            class="input input-full"
+            type="text"
+            maxlength="64"
+            data-testid="copy-scenario-name"
+          />
+        </div>
+
+        <label class="check" for="copy-rewrite-headers">
+          <input id="copy-rewrite-headers" type="checkbox" checked data-testid="copy-rewrite-headers" />
+          <span class="check-copy">
+            <span class="check-title">Rewrite CORS &amp; Location response headers</span>
+            <span class="check-hint">
+              Update <code>Access-Control-Allow-Origin</code> and <code>Location</code> headers that match the original
+              origin(s).
+            </span>
+          </span>
+        </label>
+
+        <p id="copy-scenario-error" class="field-error" role="alert" hidden></p>
+
+        <div class="modal-actions">
+          <span class="modal-spacer" aria-hidden="true"></span>
+          <button id="copy-scenario-cancel" class="btn btn-ghost" type="button">Cancel</button>
+          <button id="copy-scenario-submit" class="btn btn-primary" type="submit" data-testid="copy-scenario-submit">
+            Copy scenario
+          </button>
+        </div>
+      </form>
+    </dialog>
+
     <script type="module" src="options.js"></script>
   </body>
 </html>
