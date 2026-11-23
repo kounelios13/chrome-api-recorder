@@ -402,12 +402,15 @@
             id="copy-target-origin"
             class="input input-full"
             type="url"
+            list="copy-target-origin-list"
             placeholder="http://localhost:3000 or https://staging.example.com"
             spellcheck="false"
             data-testid="copy-target-origin"
           />
+          <datalist id="copy-target-origin-list" data-testid="copy-target-origin-list"></datalist>
           <p class="field-hint">
-            Every request in this scenario will be rewritten to this origin (keeping path, query, and response bodies).
+            Pick a known host or enter any custom origin. Every request in this scenario will be rewritten to this
+            origin (keeping path, query, and response bodies).
           </p>
         </div>
 

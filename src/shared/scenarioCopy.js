@@ -47,6 +47,78 @@ export function normalizeTargetOrigin(raw) {
   };
 }
 
+const SITE_PATTERN_RE = /^(\*|https?):\/\/([^/]+)(?:\/.*)?$/i;
+
+/**
+ * Infer a default scheme for a bare host (`http` for loopback/localhost, `https` otherwise).
+ * @param {string} host
+ */
+function defaultSchemeForHost(host) {
+  const lower = String(host ?? '').trim().toLowerCase();
+  const hostname = lower.startsWith('[') ? lower.slice(0, lower.indexOf(']') + 1) : lower.split(':')[0];
+  if (
+    hostname === 'localhost' ||
+    hostname.endsWith('.localhost') ||
+    hostname === '127.0.0.1' ||
+    hostname === '[::1]'
+  ) {
+    return 'http';
+  }
+  return 'https';
+}
+
+/**
+ * Collect deduplicated, sorted target origin suggestions from configured
+ * allowed sites and existing scenarios' recorded hosts.
+ *
+ * Wildcard site patterns (all-sites or wildcard subdomains) are skipped because
+ * they do not represent a concrete target origin.
+ *
+ * @param {{
+ *   sites?: Array<string | {pattern?: string}>,
+ *   scenarios?: Array<{hosts?: string[]}>,
+ * }} [options]
+ * @returns {string[]}
+ */
+export function collectSuggestedTargetOrigins({ sites = [], scenarios = [] } = {}) {
+  const origins = new Set();
+
+  if (Array.isArray(sites)) {
+    for (const item of sites) {
+      const pattern = typeof item === 'string' ? item : String(item?.pattern ?? '');
+      const match = SITE_PATTERN_RE.exec(pattern.trim());
+      if (!match) continue;
+      const rawScheme = match[1].toLowerCase();
+      const host = match[2].toLowerCase();
+      if (!host || host.includes('*')) continue;
+      const scheme = rawScheme === '*' ? defaultSchemeForHost(host) : rawScheme;
+      try {
+        origins.add(normalizeTargetOrigin(`${scheme}://${host}`).origin);
+      } catch {
+        /* ignore malformed site pattern */
+      }
+    }
+  }
+
+  if (Array.isArray(scenarios)) {
+    for (const scenario of scenarios) {
+      const hosts = Array.isArray(scenario?.hosts) ? scenario.hosts : [];
+      for (const rawHost of hosts) {
+        const host = String(rawHost ?? '').trim().toLowerCase();
+        if (!host || host.includes('*')) continue;
+        const candidate = /^https?:\/\//i.test(host) ? host : `${defaultSchemeForHost(host)}://${host}`;
+        try {
+          origins.add(normalizeTargetOrigin(candidate).origin);
+        } catch {
+          /* ignore malformed host */
+        }
+      }
+    }
+  }
+
+  return [...origins].sort();
+}
+
 /**
  * Build a default name for a copied scenario (`<name> (<targetHost>)`),
  * truncated to fit `LIMITS.MAX_SCENARIO_NAME`.

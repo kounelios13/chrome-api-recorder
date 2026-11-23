@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  collectSuggestedTargetOrigins,
   defaultCopyScenarioName,
   normalizeTargetOrigin,
   rewriteRequestPreview,
@@ -197,4 +198,29 @@ test('rewriteScenarioEntries respects rewriteHeaders: false and handles empty sc
   });
   assert.equal(empty.copiedCount, 0);
   assert.deepEqual(empty.hosts, ['staging.example.com']);
+});
+
+test('collectSuggestedTargetOrigins gathers deduplicated origins from allowed sites and scenarios', () => {
+  const suggestions = collectSuggestedTargetOrigins({
+    sites: [
+      { pattern: '*://*/*', granted: true },
+      { pattern: '*://*.wildcard.example.com/*', granted: true },
+      { pattern: '*://localhost/*', granted: true },
+      { pattern: '*://staging.example.com/*', granted: true },
+      { pattern: 'http://dev.internal/*', granted: true },
+    ],
+    scenarios: [
+      { hosts: ['localhost:3000', 'staging.example.com', '127.0.0.1:8080'] },
+      { hosts: ['api.prod.example.com', 'localhost:3000'] },
+    ],
+  });
+
+  assert.deepEqual(suggestions, [
+    'http://127.0.0.1:8080',
+    'http://dev.internal',
+    'http://localhost',
+    'http://localhost:3000',
+    'https://api.prod.example.com',
+    'https://staging.example.com',
+  ]);
 });

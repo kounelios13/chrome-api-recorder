@@ -12,7 +12,11 @@ import { normalizeSiteInput } from '../shared/patterns.js';
 import { shortUrl } from '../shared/url.js';
 import { normalizeScenarioName } from '../shared/scenarios.js';
 import { filterEntries } from '../shared/filterEntries.js';
-import { defaultCopyScenarioName, normalizeTargetOrigin } from '../shared/scenarioCopy.js';
+import {
+  collectSuggestedTargetOrigins,
+  defaultCopyScenarioName,
+  normalizeTargetOrigin,
+} from '../shared/scenarioCopy.js';
 import { scenarioFileSlug } from '../shared/scenarioTransfer.js';
 
 const MB = 1024 * 1024;
@@ -209,6 +213,7 @@ function cacheDom() {
     'copy-scenario-cancel',
     'copy-scenario-submit',
     'copy-target-origin',
+    'copy-target-origin-list',
     'copy-scenario-name',
     'copy-rewrite-headers',
     'copy-scenario-error',
@@ -841,6 +846,7 @@ function openCopyDialog(scenario) {
     .filter(Boolean)
     .join(' · ');
 
+  renderCopyOriginSuggestions();
   dom.copyTargetOrigin.value = '';
   dom.copyScenarioName.value = defaultCopyScenarioName(scenario.name, '');
   dom.copyRewriteHeaders.checked = true;
@@ -851,6 +857,16 @@ function openCopyDialog(scenario) {
     dom.copyScenarioDialog.setAttribute('open', '');
   }
   dom.copyTargetOrigin.focus();
+}
+
+function renderCopyOriginSuggestions() {
+  const suggestions = collectSuggestedTargetOrigins({
+    sites: state.sites,
+    scenarios: state.scenarios,
+  });
+  dom.copyTargetOriginList.replaceChildren(
+    ...suggestions.map((origin) => el('option', { value: origin })),
+  );
 }
 
 function closeCopyDialog() {
