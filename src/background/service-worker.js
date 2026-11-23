@@ -11,6 +11,7 @@ import { isHttpUrl } from '../shared/url.js';
 import { patternForTabUrl } from '../shared/patterns.js';
 import { newScenario, newScenarioId, normalizeScenarioName } from '../shared/scenarios.js';
 import { collectEntryHosts, sanitizeHosts } from '../shared/scenarioHosts.js';
+import { normalizeTargetOrigin, rewriteScenarioEntries } from '../shared/scenarioCopy.js';
 import {
   buildCollectionExportDocument,
   buildExportDocument,
@@ -168,6 +169,57 @@ async function dispatch(message, sender) {
       await store.setScenarios(scenarios);
       sessions.updateSessionScenarioName(id, name);
       return { ok: true, scenario, scenarios: await listScenariosWithCounts() };
+    }
+
+    case MSG.SCENARIO_COPY: {
+      const sourceId = requireString(message.scenarioId, 'Missing scenario id.');
+      const name = normalizeScenarioName(message.name);
+      const target = normalizeTargetOrigin(message.targetOrigin);
+      const rewriteHeaders = message.rewriteHeaders !== false;
+
+      const scenarios = await store.getScenarios();
+      const source = scenarios.find((item) => item.id === sourceId);
+      if (!source) throw new Error('That scenario no longer exists.');
+      ensureUniqueName(scenarios, name);
+
+      const entries = await db.listEntries(sourceId);
+      const bodiesById = {};
+      for (const entry of entries) {
+        bodiesById[entry.id] = (await db.getBody(entry.id)) ?? { id: entry.id, body: '' };
+      }
+
+      const id = newScenarioId();
+      const now = Date.now();
+      const rewritten = await rewriteScenarioEntries({
+        entries,
+        bodiesById,
+        newScenarioId: id,
+        targetOrigin: target.origin,
+        rewriteHeaders,
+      });
+
+      if (rewritten.records.length > 0) {
+        await db.saveEntriesBulk(rewritten.records);
+      }
+
+      const scenario = {
+        id,
+        name,
+        createdAt: now,
+        updatedAt: now,
+        hosts: rewritten.hosts,
+      };
+      scenarios.push(scenario);
+      await store.setScenarios(scenarios);
+
+      return {
+        ok: true,
+        scenario: { ...scenario, entryCount: rewritten.copiedCount },
+        scenarios: await listScenariosWithCounts(),
+        copiedCount: rewritten.copiedCount,
+        rekeyedCount: rewritten.rekeyedCount,
+        fallbackCount: rewritten.fallbackCount,
+      };
     }
 
     case MSG.SCENARIO_DELETE: {

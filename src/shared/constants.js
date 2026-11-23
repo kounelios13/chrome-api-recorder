@@ -15,6 +15,7 @@ export const MSG = Object.freeze({
   STOP_SESSION: 'session.stop',
   SCENARIO_CREATE: 'scenario.create',
   SCENARIO_RENAME: 'scenario.rename',
+  SCENARIO_COPY: 'scenario.copy',
   SCENARIO_DELETE: 'scenario.delete',
   SCENARIO_ENTRIES: 'scenario.entries',
   ENTRY_GET: 'scenario.entry.get',

@@ -12,6 +12,7 @@ import { normalizeSiteInput } from '../shared/patterns.js';
 import { shortUrl } from '../shared/url.js';
 import { normalizeScenarioName } from '../shared/scenarios.js';
 import { filterEntries } from '../shared/filterEntries.js';
+import { defaultCopyScenarioName, normalizeTargetOrigin } from '../shared/scenarioCopy.js';
 import { scenarioFileSlug } from '../shared/scenarioTransfer.js';
 
 const MB = 1024 * 1024;
@@ -51,6 +52,9 @@ const state = {
   entriesFilter: '',
   /** @type {null|{scenarioId:string, entry:any, payload:any, editable:boolean, hasOriginal:boolean}} */
   editing: null,
+  /** @type {Scenario|null} */
+  copyingScenario: null,
+  copyNameDirty: false,
   statusTimer: 0,
   savedTimer: 0,
   unsubscribe: null,
@@ -198,6 +202,16 @@ function cacheDom() {
     'entry-editor-restore',
     'entry-editor-save',
     'payload-editor',
+    'copy-scenario-dialog',
+    'copy-scenario-form',
+    'copy-scenario-meta',
+    'copy-scenario-close',
+    'copy-scenario-cancel',
+    'copy-scenario-submit',
+    'copy-target-origin',
+    'copy-scenario-name',
+    'copy-rewrite-headers',
+    'copy-scenario-error',
   ];
   for (const id of ids) {
     const element = document.getElementById(id);
@@ -244,6 +258,23 @@ function wireEvents() {
   });
   dom.entryEditor.addEventListener('click', (event) => {
     if (event.target === dom.entryEditor) closeEditor();
+  });
+
+  dom.copyScenarioForm.addEventListener('submit', onCopyScenarioSubmit);
+  dom.copyScenarioClose.addEventListener('click', closeCopyDialog);
+  dom.copyScenarioCancel.addEventListener('click', closeCopyDialog);
+  dom.copyTargetOrigin.addEventListener('input', onCopyTargetOriginInput);
+  dom.copyScenarioName.addEventListener('input', () => {
+    state.copyNameDirty = true;
+    hideFieldError(dom.copyScenarioError);
+  });
+  dom.copyScenarioDialog.addEventListener('close', () => {
+    state.copyingScenario = null;
+    state.copyNameDirty = false;
+    hideFieldError(dom.copyScenarioError);
+  });
+  dom.copyScenarioDialog.addEventListener('click', (event) => {
+    if (event.target === dom.copyScenarioDialog) closeCopyDialog();
   });
 }
 
@@ -742,6 +773,19 @@ function renderScenarioRow(scenario) {
   );
   renameButton.addEventListener('click', () => beginRename(scenario));
 
+  const copyButton = el(
+    'button',
+    {
+      class: 'btn btn-ghost btn-sm',
+      type: 'button',
+      'data-testid': `copy-scenario-${scenario.id}`,
+      'aria-label': `Copy scenario ${scenario.name} to another host`,
+      title: 'Copy all requests in this scenario to a different target origin',
+    },
+    'Copy to host…',
+  );
+  copyButton.addEventListener('click', () => openCopyDialog(scenario));
+
   const exportButton = el(
     'button',
     {
@@ -767,9 +811,127 @@ function renderScenarioRow(scenario) {
   );
   deleteButton.addEventListener('click', () => onDeleteClicked(scenario, deleteButton));
 
-  const actions = el('div', { class: 'scenario-actions' }, exportButton, viewButton, renameButton, deleteButton);
+  const actions = el(
+    'div',
+    { class: 'scenario-actions' },
+    copyButton,
+    exportButton,
+    viewButton,
+    renameButton,
+    deleteButton,
+  );
   row.append(main, actions);
   return row;
+}
+
+/** @param {Scenario} scenario */
+function openCopyDialog(scenario) {
+  hideError();
+  hideFieldError(dom.copyScenarioError);
+  state.copyingScenario = scenario;
+  state.copyNameDirty = false;
+
+  const count = scenario.entryCount;
+  const hostList = scenario.hosts ?? [];
+  dom.copyScenarioMeta.textContent = [
+    `Source: ${scenario.name}`,
+    `${count} request${count === 1 ? '' : 's'}`,
+    hostList.length > 0 ? `hosts: ${hostList.join(', ')}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  dom.copyTargetOrigin.value = '';
+  dom.copyScenarioName.value = defaultCopyScenarioName(scenario.name, '');
+  dom.copyRewriteHeaders.checked = true;
+
+  if (typeof dom.copyScenarioDialog.showModal === 'function') {
+    if (!dom.copyScenarioDialog.open) dom.copyScenarioDialog.showModal();
+  } else {
+    dom.copyScenarioDialog.setAttribute('open', '');
+  }
+  dom.copyTargetOrigin.focus();
+}
+
+function closeCopyDialog() {
+  if (typeof dom.copyScenarioDialog.close === 'function') {
+    if (dom.copyScenarioDialog.open) dom.copyScenarioDialog.close();
+  } else {
+    dom.copyScenarioDialog.removeAttribute('open');
+  }
+  state.copyingScenario = null;
+  state.copyNameDirty = false;
+  hideFieldError(dom.copyScenarioError);
+}
+
+function onCopyTargetOriginInput() {
+  hideFieldError(dom.copyScenarioError);
+  if (!state.copyingScenario || state.copyNameDirty) return;
+  try {
+    const { host } = normalizeTargetOrigin(dom.copyTargetOrigin.value);
+    dom.copyScenarioName.value = defaultCopyScenarioName(state.copyingScenario.name, host);
+  } catch {
+    dom.copyScenarioName.value = defaultCopyScenarioName(state.copyingScenario.name, '');
+  }
+}
+
+/** @param {Event} event */
+async function onCopyScenarioSubmit(event) {
+  event.preventDefault();
+  const source = state.copyingScenario;
+  if (!source) return;
+
+  hideError();
+  hideFieldError(dom.copyScenarioError);
+
+  let target;
+  try {
+    target = normalizeTargetOrigin(dom.copyTargetOrigin.value);
+  } catch (error) {
+    showFieldError(dom.copyScenarioError, errorMessage(error, 'Enter a valid target origin.'));
+    dom.copyTargetOrigin.focus();
+    return;
+  }
+
+  let name;
+  try {
+    name = normalizeScenarioName(dom.copyScenarioName.value);
+  } catch (error) {
+    showFieldError(dom.copyScenarioError, errorMessage(error, 'Give the new scenario a name.'));
+    dom.copyScenarioName.focus();
+    return;
+  }
+
+  setBusy(dom.copyScenarioSubmit, true);
+  try {
+    const response = await send(MSG.SCENARIO_COPY, {
+      scenarioId: source.id,
+      name,
+      targetOrigin: target.origin,
+      rewriteHeaders: dom.copyRewriteHeaders.checked,
+    });
+    if (Array.isArray(response?.scenarios)) {
+      state.scenarios = normalizeScenarios(response.scenarios);
+    } else if (response?.scenario) {
+      state.scenarios = [...state.scenarios, ...normalizeScenarios([response.scenario])];
+    }
+    renderScenarios();
+    closeCopyDialog();
+
+    const copiedCount = toCount(response?.copiedCount);
+    const fallbackCount = toCount(response?.fallbackCount);
+    const fallbackNote =
+      fallbackCount > 0
+        ? ` ${fallbackCount} request${fallbackCount === 1 ? '' : 's'} with a request body will match via smart fallback on replay.`
+        : '';
+    showStatus(
+      `Copied “${name}” to ${target.host} (${copiedCount} request${copiedCount === 1 ? '' : 's'}).${fallbackNote}`,
+    );
+  } catch (error) {
+    showFieldError(dom.copyScenarioError, errorMessage(error, 'Could not copy the scenario.'));
+  } finally {
+    setBusy(dom.copyScenarioSubmit, false);
+  }
 }
 
 /** @param {Scenario} scenario */
