@@ -611,6 +611,27 @@ async function main() {
       })()`,
       'the copy scenario dialog to open',
     );
+    const comboboxClosedByDefault = await evaluate(
+      client,
+      extensionSession,
+      `(() => {
+        const list = document.querySelector('[data-testid="copy-target-origin-list"]');
+        const input = document.querySelector('[data-testid="copy-target-origin"]');
+        return {
+          hidden: list.hasAttribute('hidden'),
+          display: getComputedStyle(list).display,
+          expanded: input.getAttribute('aria-expanded'),
+        };
+      })()`,
+    );
+    check(
+      'copy dialog keeps the host combobox closed by default',
+      comboboxClosedByDefault.hidden &&
+        comboboxClosedByDefault.display === 'none' &&
+        comboboxClosedByDefault.expanded === 'false',
+      JSON.stringify(comboboxClosedByDefault),
+    );
+    await clickInPage(client, extensionSession, '[data-testid="copy-target-origin"]');
     const combobox = await evaluate(
       client,
       extensionSession,
