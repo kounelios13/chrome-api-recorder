@@ -398,16 +398,52 @@
 
         <div class="field">
           <label class="field-label" for="copy-target-origin">Target origin</label>
-          <input
-            id="copy-target-origin"
-            class="input input-full"
-            type="url"
-            list="copy-target-origin-list"
-            placeholder="http://localhost:3000 or https://staging.example.com"
-            spellcheck="false"
-            data-testid="copy-target-origin"
-          />
-          <datalist id="copy-target-origin-list" data-testid="copy-target-origin-list"></datalist>
+          <div id="copy-target-origin-combobox" class="combobox">
+            <input
+              id="copy-target-origin"
+              class="input input-full combobox-input"
+              type="text"
+              inputmode="url"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded="false"
+              aria-controls="copy-target-origin-list"
+              autocomplete="off"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              placeholder="http://localhost:3000 or https://staging.example.com"
+              data-testid="copy-target-origin"
+            />
+            <button
+              id="copy-target-origin-toggle"
+              class="combobox-toggle"
+              type="button"
+              tabindex="-1"
+              aria-label="Toggle known hosts"
+              aria-expanded="false"
+              aria-controls="copy-target-origin-list"
+              data-testid="copy-target-origin-toggle"
+            >
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
+                <path
+                  d="M4 6l4 4 4-4"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+            <ul
+              id="copy-target-origin-list"
+              class="combobox-menu"
+              role="listbox"
+              aria-label="Known target origins"
+              data-testid="copy-target-origin-list"
+              hidden
+            ></ul>
+          </div>
           <p class="field-hint">
             Pick a known host or enter any custom origin. Every request in this scenario will be rewritten to this
             origin (keeping path, query, and response bodies).

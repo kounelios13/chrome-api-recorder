@@ -1146,3 +1146,86 @@ code {
 .entry-delete-btn svg {
   display: block;
 }
+
+
+/* ------------------------------------------------------------------ */
+/* Target origin combobox                                              */
+/* ------------------------------------------------------------------ */
+
+.combobox {
+  position: relative;
+}
+
+.combobox-input {
+  padding-right: 36px;
+}
+
+.combobox-toggle {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  bottom: 1px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 0 calc(var(--radius-sm) - 1px) calc(var(--radius-sm) - 1px) 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 120ms ease, background-color 120ms ease;
+}
+
+.combobox-toggle:hover {
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--text-strong);
+}
+
+.combobox-toggle svg {
+  display: block;
+  transition: transform 140ms ease;
+}
+
+.combobox-toggle[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
+.combobox-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 10;
+  max-height: 200px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+  box-shadow: 0 14px 32px rgba(2, 6, 23, 0.55);
+}
+
+.combobox-option {
+  padding: 7px 10px;
+  border-radius: var(--radius-xs);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.combobox-option:hover,
+.combobox-option[aria-selected='true'] {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+
+.combobox-option[aria-selected='true'] {
+  box-shadow: inset 2px 0 0 var(--replay);
+}

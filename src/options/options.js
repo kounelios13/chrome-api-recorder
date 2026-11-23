@@ -59,6 +59,12 @@ const state = {
   /** @type {Scenario|null} */
   copyingScenario: null,
   copyNameDirty: false,
+  /** @type {string[]} */
+  copyOriginSuggestions: [],
+  /** @type {string[]} */
+  copyOriginFiltered: [],
+  copyOriginOpen: false,
+  copyOriginActiveIndex: -1,
   statusTimer: 0,
   savedTimer: 0,
   unsubscribe: null,
@@ -212,7 +218,9 @@ function cacheDom() {
     'copy-scenario-close',
     'copy-scenario-cancel',
     'copy-scenario-submit',
+    'copy-target-origin-combobox',
     'copy-target-origin',
+    'copy-target-origin-toggle',
     'copy-target-origin-list',
     'copy-scenario-name',
     'copy-rewrite-headers',
@@ -269,6 +277,23 @@ function wireEvents() {
   dom.copyScenarioClose.addEventListener('click', closeCopyDialog);
   dom.copyScenarioCancel.addEventListener('click', closeCopyDialog);
   dom.copyTargetOrigin.addEventListener('input', onCopyTargetOriginInput);
+  dom.copyTargetOrigin.addEventListener('focus', () => openCopyOriginMenu({ showAll: false }));
+  dom.copyTargetOrigin.addEventListener('keydown', onCopyTargetOriginKeydown);
+  dom.copyTargetOriginToggle.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    if (state.copyOriginOpen) {
+      closeCopyOriginMenu();
+    } else {
+      dom.copyTargetOrigin.focus();
+      openCopyOriginMenu({ showAll: true });
+    }
+  });
+  dom.copyTargetOriginList.addEventListener('mousedown', (event) => {
+    const option = event.target instanceof Element ? event.target.closest('[role="option"]') : null;
+    if (!option) return;
+    event.preventDefault();
+    selectCopyOriginSuggestion(option.getAttribute('data-value') ?? '');
+  });
   dom.copyScenarioName.addEventListener('input', () => {
     state.copyNameDirty = true;
     hideFieldError(dom.copyScenarioError);
@@ -276,10 +301,17 @@ function wireEvents() {
   dom.copyScenarioDialog.addEventListener('close', () => {
     state.copyingScenario = null;
     state.copyNameDirty = false;
+    closeCopyOriginMenu();
     hideFieldError(dom.copyScenarioError);
   });
   dom.copyScenarioDialog.addEventListener('click', (event) => {
-    if (event.target === dom.copyScenarioDialog) closeCopyDialog();
+    if (event.target === dom.copyScenarioDialog) {
+      closeCopyDialog();
+      return;
+    }
+    if (state.copyOriginOpen && event.target instanceof Node && !dom.copyTargetOriginCombobox.contains(event.target)) {
+      closeCopyOriginMenu();
+    }
   });
 }
 
@@ -846,10 +878,15 @@ function openCopyDialog(scenario) {
     .filter(Boolean)
     .join(' · ');
 
-  renderCopyOriginSuggestions();
+  state.copyOriginSuggestions = collectSuggestedTargetOrigins({
+    sites: state.sites,
+    scenarios: state.scenarios,
+  });
+  dom.copyTargetOriginToggle.hidden = state.copyOriginSuggestions.length === 0;
   dom.copyTargetOrigin.value = '';
   dom.copyScenarioName.value = defaultCopyScenarioName(scenario.name, '');
   dom.copyRewriteHeaders.checked = true;
+  closeCopyOriginMenu();
 
   if (typeof dom.copyScenarioDialog.showModal === 'function') {
     if (!dom.copyScenarioDialog.open) dom.copyScenarioDialog.showModal();
@@ -859,17 +896,119 @@ function openCopyDialog(scenario) {
   dom.copyTargetOrigin.focus();
 }
 
-function renderCopyOriginSuggestions() {
-  const suggestions = collectSuggestedTargetOrigins({
-    sites: state.sites,
-    scenarios: state.scenarios,
-  });
+/** @param {{ showAll?: boolean }} [options] */
+function openCopyOriginMenu({ showAll = false } = {}) {
+  const query = showAll ? '' : dom.copyTargetOrigin.value.trim().toLowerCase();
+  const filtered = query
+    ? state.copyOriginSuggestions.filter((origin) => origin.toLowerCase().includes(query))
+    : state.copyOriginSuggestions;
+
+  state.copyOriginFiltered = filtered;
+  state.copyOriginActiveIndex = -1;
+
+  if (filtered.length === 0) {
+    closeCopyOriginMenu();
+    return;
+  }
+
   dom.copyTargetOriginList.replaceChildren(
-    ...suggestions.map((origin) => el('option', { value: origin })),
+    ...filtered.map((origin, index) =>
+      el(
+        'li',
+        {
+          id: `copy-target-origin-option-${index}`,
+          class: 'combobox-option',
+          role: 'option',
+          'aria-selected': 'false',
+          'data-value': origin,
+          'data-testid': 'copy-target-origin-option',
+          title: origin,
+        },
+        origin,
+      ),
+    ),
   );
+  state.copyOriginOpen = true;
+  dom.copyTargetOriginList.hidden = false;
+  dom.copyTargetOrigin.setAttribute('aria-expanded', 'true');
+  dom.copyTargetOrigin.removeAttribute('aria-activedescendant');
+  dom.copyTargetOriginToggle.setAttribute('aria-expanded', 'true');
+}
+
+function closeCopyOriginMenu() {
+  state.copyOriginOpen = false;
+  state.copyOriginFiltered = [];
+  state.copyOriginActiveIndex = -1;
+  dom.copyTargetOriginList.hidden = true;
+  dom.copyTargetOrigin.setAttribute('aria-expanded', 'false');
+  dom.copyTargetOrigin.removeAttribute('aria-activedescendant');
+  dom.copyTargetOriginToggle.setAttribute('aria-expanded', 'false');
+}
+
+/** @param {number} nextIndex */
+function setCopyOriginActiveIndex(nextIndex) {
+  const options = dom.copyTargetOriginList.children;
+  if (options.length === 0) return;
+
+  if (state.copyOriginActiveIndex >= 0 && options[state.copyOriginActiveIndex]) {
+    options[state.copyOriginActiveIndex].setAttribute('aria-selected', 'false');
+  }
+  state.copyOriginActiveIndex = nextIndex;
+  const active = options[nextIndex];
+  if (active) {
+    active.setAttribute('aria-selected', 'true');
+    dom.copyTargetOrigin.setAttribute('aria-activedescendant', active.id);
+    if (typeof active.scrollIntoView === 'function') {
+      active.scrollIntoView({ block: 'nearest' });
+    }
+  } else {
+    dom.copyTargetOrigin.removeAttribute('aria-activedescendant');
+  }
+}
+
+/** @param {string} origin */
+function selectCopyOriginSuggestion(origin) {
+  dom.copyTargetOrigin.value = origin;
+  closeCopyOriginMenu();
+  updateCopyScenarioNameFromOrigin();
+  dom.copyTargetOrigin.focus();
+}
+
+/** @param {KeyboardEvent} event */
+function onCopyTargetOriginKeydown(event) {
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    if (!state.copyOriginOpen) {
+      openCopyOriginMenu({ showAll: false });
+      if (state.copyOriginFiltered.length > 0) setCopyOriginActiveIndex(0);
+      return;
+    }
+    const next = (state.copyOriginActiveIndex + 1) % state.copyOriginFiltered.length;
+    setCopyOriginActiveIndex(next);
+  } else if (event.key === 'ArrowUp') {
+    if (!state.copyOriginOpen) return;
+    event.preventDefault();
+    const len = state.copyOriginFiltered.length;
+    const next = state.copyOriginActiveIndex <= 0 ? len - 1 : state.copyOriginActiveIndex - 1;
+    setCopyOriginActiveIndex(next);
+  } else if (event.key === 'Enter') {
+    if (state.copyOriginOpen && state.copyOriginActiveIndex >= 0) {
+      event.preventDefault();
+      selectCopyOriginSuggestion(state.copyOriginFiltered[state.copyOriginActiveIndex]);
+    }
+  } else if (event.key === 'Escape') {
+    if (state.copyOriginOpen) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeCopyOriginMenu();
+    }
+  } else if (event.key === 'Tab') {
+    closeCopyOriginMenu();
+  }
 }
 
 function closeCopyDialog() {
+  closeCopyOriginMenu();
   if (typeof dom.copyScenarioDialog.close === 'function') {
     if (dom.copyScenarioDialog.open) dom.copyScenarioDialog.close();
   } else {
@@ -880,7 +1019,7 @@ function closeCopyDialog() {
   hideFieldError(dom.copyScenarioError);
 }
 
-function onCopyTargetOriginInput() {
+function updateCopyScenarioNameFromOrigin() {
   hideFieldError(dom.copyScenarioError);
   if (!state.copyingScenario || state.copyNameDirty) return;
   try {
@@ -889,6 +1028,11 @@ function onCopyTargetOriginInput() {
   } catch {
     dom.copyScenarioName.value = defaultCopyScenarioName(state.copyingScenario.name, '');
   }
+}
+
+function onCopyTargetOriginInput() {
+  updateCopyScenarioNameFromOrigin();
+  openCopyOriginMenu({ showAll: false });
 }
 
 /** @param {Event} event */
