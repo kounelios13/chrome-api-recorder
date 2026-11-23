@@ -593,6 +593,72 @@ async function main() {
       JSON.stringify(otherHostCreate?.scenario),
     );
 
+    // ---- The copy dialog must show its known-host combobox on screen.
+    await reloadExtensionPage(client, extensionSession);
+    await waitForValue(
+      client,
+      extensionSession,
+      `document.querySelectorAll('.scenario-row').length === 2`,
+      'the options page to list both scenarios',
+    );
+    await clickInPage(client, extensionSession, '.scenario-row .scenario-actions [data-testid^="copy-scenario-"]');
+    await waitForValue(
+      client,
+      extensionSession,
+      `(() => {
+        const dialog = document.querySelector('[data-testid="copy-scenario-dialog"]');
+        return Boolean(dialog && dialog.open);
+      })()`,
+      'the copy scenario dialog to open',
+    );
+    const combobox = await evaluate(
+      client,
+      extensionSession,
+      `(() => {
+        const list = document.querySelector('[data-testid="copy-target-origin-list"]');
+        const input = document.querySelector('[data-testid="copy-target-origin"]');
+        const rect = list.getBoundingClientRect();
+        const topmost = document.elementFromPoint(rect.left + 8, rect.top + 8);
+        return {
+          hidden: list.hasAttribute('hidden'),
+          display: getComputedStyle(list).display,
+          optionCount: list.children.length,
+          expanded: input.getAttribute('aria-expanded'),
+          inViewport: rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.bottom <= innerHeight,
+          unobstructed: Boolean(topmost && topmost.closest('[data-testid="copy-scenario-dialog"]')),
+        };
+      })()`,
+    );
+    check(
+      'copy dialog shows a visible, unclipped host combobox',
+      !combobox.hidden &&
+        combobox.display !== 'none' &&
+        combobox.optionCount >= 1 &&
+        combobox.expanded === 'true' &&
+        combobox.inViewport &&
+        combobox.unobstructed,
+      JSON.stringify(combobox),
+    );
+    const picked = await evaluate(
+      client,
+      extensionSession,
+      `(() => {
+        const list = document.querySelector('[data-testid="copy-target-origin-list"]');
+        const option = list.querySelector('[role="option"]');
+        const input = document.querySelector('[data-testid="copy-target-origin"]');
+        if (!option) return null;
+        const origin = option.getAttribute('data-value');
+        option.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        return { value: input.value, origin, closed: list.hasAttribute('hidden') };
+      })()`,
+    );
+    check(
+      'picking a known host fills the target origin and closes the list',
+      picked !== null && picked.value === picked.origin && picked.closed === true,
+      JSON.stringify(picked),
+    );
+    await clickInPage(client, extensionSession, '#copy-scenario-cancel');
+
     const recording = await extensionCall(client, extensionSession, 'session.startRecording', { tabId, scenarioId });
     check('recording started', recording?.ok === true && recording.session?.mode === 'recording', recording?.error);
 

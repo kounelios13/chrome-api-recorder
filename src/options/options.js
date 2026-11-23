@@ -278,6 +278,7 @@ function wireEvents() {
   dom.copyScenarioCancel.addEventListener('click', closeCopyDialog);
   dom.copyTargetOrigin.addEventListener('input', onCopyTargetOriginInput);
   dom.copyTargetOrigin.addEventListener('focus', () => openCopyOriginMenu({ showAll: false }));
+  dom.copyTargetOrigin.addEventListener('click', () => openCopyOriginMenu({ showAll: false }));
   dom.copyTargetOrigin.addEventListener('keydown', onCopyTargetOriginKeydown);
   dom.copyTargetOriginToggle.addEventListener('mousedown', (event) => {
     event.preventDefault();
@@ -894,6 +895,9 @@ function openCopyDialog(scenario) {
     dom.copyScenarioDialog.setAttribute('open', '');
   }
   dom.copyTargetOrigin.focus();
+  // Focus events can be suppressed when the document is not focused (e.g. the
+  // options tab is in the background), so open the list explicitly too.
+  openCopyOriginMenu({ showAll: true });
 }
 
 /** @param {{ showAll?: boolean }} [options] */
@@ -969,9 +973,9 @@ function setCopyOriginActiveIndex(nextIndex) {
 /** @param {string} origin */
 function selectCopyOriginSuggestion(origin) {
   dom.copyTargetOrigin.value = origin;
-  closeCopyOriginMenu();
   updateCopyScenarioNameFromOrigin();
   dom.copyTargetOrigin.focus();
+  closeCopyOriginMenu();
 }
 
 /** @param {KeyboardEvent} event */

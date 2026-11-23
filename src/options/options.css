@@ -1160,6 +1160,12 @@ code {
   padding-right: 36px;
 }
 
+/* `display` below would otherwise override the `hidden` attribute. */
+.combobox-toggle[hidden],
+.combobox-menu[hidden] {
+  display: none;
+}
+
 .combobox-toggle {
   position: absolute;
   top: 1px;
