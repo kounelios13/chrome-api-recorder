@@ -552,10 +552,13 @@ async function dispatch(message, sender) {
           scenarios.map((item) => item.name),
         );
         const id = newScenarioId();
-        const records = section.records.map(({ entry, body, originalBody }) => ({
+        const records = section.records.map(({ entry, body, originalBody, frames }) => ({
           entry: { ...entry, id: db.entryId(id, entry.matchKey), scenarioId: id },
           body,
           originalBody,
+          // WebSocket entries carry their frames in the export; dropping them
+          // here would import an entry whose replay falls back to the network.
+          frames,
         }));
         await db.saveEntriesBulk(records);
 

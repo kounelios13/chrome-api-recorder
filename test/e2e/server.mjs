@@ -178,7 +178,11 @@ const PAGE_HTML = `<!doctype html>
       const open = await (await fetch(location.origin + '/socket.io/?EIO=4&transport=polling&' + stamp())).text();
       const sid = JSON.parse(open.slice(1)).sid;
       const connect = await (await fetch(location.origin + '/socket.io/?EIO=4&transport=polling&' + stamp() + '&sid=' + sid)).text();
-      await fetch(location.origin + '/socket.io/?EIO=4&transport=polling&' + stamp() + '&sid=' + sid, { method: 'POST', body: '40' });
+      const postResponse = await fetch(location.origin + '/socket.io/?EIO=4&transport=polling&' + stamp() + '&sid=' + sid, { method: 'POST', body: '40' });
+      const postBody = await postResponse.text();
+      if (postResponse.status !== 200 || postBody !== 'ok') {
+        throw new Error('Socket.IO POST failed: ' + postResponse.status + ' ' + postBody);
+      }
       const socket = new WebSocket(wsUrl('/socket.io/?EIO=4&transport=websocket&sid=' + sid));
       await wsOpen(socket);
       socket.send('2probe');
@@ -187,6 +191,9 @@ const PAGE_HTML = `<!doctype html>
       const welcomeFrame = String(await waitWsMessage(socket));
       socket.send('42["echo",{"id":7}]');
       const echoedFrame = String(await waitWsMessage(socket));
+      const ackId = window.__wsAckId || 1;
+      socket.send('42' + ackId + '["ack",{"id":8}]');
+      const ackFrame = String(await waitWsMessage(socket));
       socket.close(1000);
       return {
         openPrefix: open.slice(0, 1),
@@ -195,6 +202,7 @@ const PAGE_HTML = `<!doctype html>
         probe: probe,
         welcome: JSON.parse(welcomeFrame.slice(2)),
         echoed: JSON.parse(echoedFrame.slice(2)),
+        ackFrame: ackFrame,
       };
     }
 
@@ -274,6 +282,8 @@ export async function startTestServer() {
     log: [],
     /** When false, WebSocket upgrades are refused (offline-replay assertions). */
     wsEnabled: true,
+    /** When true, WS handshake HTTP endpoints answer 503 so a replay miss is loud. */
+    rejectWsHttp: false,
     socketioConnected: new Set(),
     upgrades: 0,
   };
@@ -332,6 +342,10 @@ async function handleRequest(request, response, state) {
   }
 
   if (url.pathname === '/hub/negotiate') {
+    if (state.rejectWsHttp) {
+      sendJson(response, { error: 'offline replay: negotiate reached the network' }, 503);
+      return;
+    }
     const connectionId = createSid();
     sendJson(response, {
       negotiateVersion: 1,
@@ -403,6 +417,11 @@ async function handleRequest(request, response, state) {
 async function handleSocketIoHttp(request, response, url, state) {
   const method = request.method ?? 'GET';
   const sid = url.searchParams.get('sid');
+
+  if (state.rejectWsHttp) {
+    sendJson(response, { error: 'offline replay: socket.io handshake reached the network' }, 503);
+    return;
+  }
 
   if (method === 'POST') {
     await readBody(request);
@@ -492,6 +511,13 @@ function handleUpgrade(request, socket, head, state) {
       const echo = /^42\["echo",(\{.*\})\]$/.exec(text);
       if (echo) {
         connection.sendText(`42["echoed",${JSON.stringify({ ...JSON.parse(echo[1]), version: state.version })}]`);
+        return;
+      }
+      const ack = /^42(\d+)\["ack",(\{.*\})\]$/.exec(text);
+      if (ack) {
+        connection.sendText(
+          `43${ack[1]}${JSON.stringify([{ ...JSON.parse(ack[2]), version: state.version }])}`,
+        );
       }
     });
     return;

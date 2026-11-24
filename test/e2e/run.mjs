@@ -1393,6 +1393,12 @@ async function main() {
       JSON.stringify(recordedWs.socketio),
     );
     check(
+      'Socket.IO ack replies are recorded with their ack id',
+      String(recordedWs.socketio?.ackFrame ?? '').startsWith('431[') &&
+        String(recordedWs.socketio?.ackFrame ?? '').includes(`"version":"${wsVersion}"`),
+      JSON.stringify(recordedWs.socketio?.ackFrame),
+    );
+    check(
       'SignalR negotiate + batched replies are exercised end to end',
       recordedWs.signalr?.token === true &&
         recordedWs.signalr?.handshake === '{}' + String.fromCharCode(30) &&
@@ -1429,7 +1435,13 @@ async function main() {
     // recordings to answer all three protocols without a single upgrade.
     server.state.version = `${wsVersion}-next`;
     server.state.wsEnabled = false;
+    server.state.rejectWsHttp = true;
     const upgradesBeforeReplay = server.state.upgrades;
+    const wsHttpBeforeReplay = {
+      pollGet: server.hitsOf('GET', '/socket.io/'),
+      pollPost: server.hitsOf('POST', '/socket.io/'),
+      negotiate: server.hitsOf('POST', '/hub/negotiate'),
+    };
     const wsReplay = await extensionCall(client, extensionSession, 'session.startReplay', {
       tabId,
       scenarioId: wsScenarioId,
@@ -1439,6 +1451,8 @@ async function main() {
     await runInPage(client, extensionSession, tabId, () => {
       window.__test.ws = null;
       window.__test.wsDone = false;
+      // A different ack id forces the replay planner to rewrite the recorded reply.
+      window.__wsAckId = 5;
       window.__wsScenario('core');
       return true;
     });
@@ -1459,6 +1473,12 @@ async function main() {
       JSON.stringify(replayedWs.socketio),
     );
     check(
+      'replay rewrites the Socket.IO ack id',
+      String(replayedWs.socketio?.ackFrame ?? '').startsWith('435[') &&
+        String(replayedWs.socketio?.ackFrame ?? '').includes(`"version":"${wsVersion}"`),
+      JSON.stringify(replayedWs.socketio?.ackFrame),
+    );
+    check(
       'replayed SignalR handshake and invocation work offline',
       replayedWs.signalr?.messages?.[1]?.result?.version === wsVersion &&
         replayedWs.signalr?.messages?.[1]?.invocationId === '9',
@@ -1469,9 +1489,26 @@ async function main() {
       server.state.upgrades === upgradesBeforeReplay,
       `before=${upgradesBeforeReplay} after=${server.state.upgrades}`,
     );
+    const wsHttpAfterReplay = {
+      pollGet: server.hitsOf('GET', '/socket.io/'),
+      pollPost: server.hitsOf('POST', '/socket.io/'),
+      negotiate: server.hitsOf('POST', '/hub/negotiate'),
+    };
+    check(
+      'offline replay served the Socket.IO polling POST from the recording, not the server',
+      wsHttpAfterReplay.pollPost === wsHttpBeforeReplay.pollPost,
+      `before=${JSON.stringify(wsHttpBeforeReplay)} after=${JSON.stringify(wsHttpAfterReplay)}`,
+    );
+    check(
+      'offline replay served every WebSocket transport handshake from the recording',
+      wsHttpAfterReplay.pollGet === wsHttpBeforeReplay.pollGet &&
+        wsHttpAfterReplay.negotiate === wsHttpBeforeReplay.negotiate,
+      `before=${JSON.stringify(wsHttpBeforeReplay)} after=${JSON.stringify(wsHttpAfterReplay)}`,
+    );
 
     // GraphQL sockets are excluded, so they still go live during replay.
     server.state.wsEnabled = true;
+    server.state.rejectWsHttp = false;
     const upgradesBeforeGraphql = server.state.upgrades;
     await runInPage(client, extensionSession, tabId, () => {
       window.__test.ws = null;
@@ -1513,6 +1550,7 @@ async function main() {
     await runInPage(client, extensionSession, tabId, () => {
       window.__test.ws = null;
       window.__test.wsDone = false;
+      window.__wsAckId = 1;
       window.__wsScenario('raw');
       return true;
     });
@@ -1546,6 +1584,78 @@ async function main() {
     );
 
     await extensionCall(client, extensionSession, 'session.stop', { tabId });
+
+    // ---- v2 export/import round trip preserves WebSocket recordings.
+    const wsExport = await extensionCall(client, extensionSession, 'scenario.export', { scenarioId: wsScenarioId });
+    const exportedWsEntries = (wsExport?.data?.entries ?? []).filter((entry) => entry.kind === 'ws');
+    check(
+      'v2 export carries WebSocket entries with their frames',
+      wsExport?.ok === true &&
+        wsExport?.data?.formatVersion === 2 &&
+        exportedWsEntries.length === 3 &&
+        exportedWsEntries.every((entry) => Array.isArray(entry.frames) && entry.frames.length > 0),
+      JSON.stringify({ version: wsExport?.data?.formatVersion, ws: exportedWsEntries.length }),
+    );
+
+    const wsImportPayload = {
+      ...wsExport.data,
+      scenario: { ...wsExport.data.scenario, name: 'Imported websockets' },
+    };
+    const wsImport = await extensionCall(client, extensionSession, 'scenario.import', { data: wsImportPayload });
+    const importedWsScenario = (wsImport?.scenarios ?? [])[0];
+    check(
+      'importing a v2 document restores every WebSocket recording',
+      wsImport?.ok === true &&
+        wsImport?.imported === (wsExport?.data?.entries ?? []).length &&
+        importedWsScenario?.entryCount === (wsExport?.data?.entries ?? []).length,
+      JSON.stringify({ imported: wsImport?.imported, scenario: importedWsScenario?.name }),
+    );
+
+    if (importedWsScenario?.id) {
+      const importedEntries = await extensionCall(client, extensionSession, 'scenario.entries', {
+        scenarioId: importedWsScenario.id,
+        limit: 50,
+      });
+      check(
+        'imported scenario keeps all three WebSocket entries with frames',
+        (importedEntries?.entries ?? []).filter((entry) => entry.kind === 'ws').length === 3 &&
+          (importedEntries?.entries ?? [])
+            .filter((entry) => entry.kind === 'ws')
+            .every((entry) => Number(entry.frameCount) > 0),
+        JSON.stringify((importedEntries?.entries ?? []).map((entry) => ({ url: entry.url, frames: entry.frameCount }))),
+      );
+    }
+
+    if (importedWsScenario?.id) {
+      server.state.version = `${wsVersion}-imported`;
+      server.state.wsEnabled = false;
+      server.state.rejectWsHttp = true;
+      const importedReplay = await extensionCall(client, extensionSession, 'session.startReplay', {
+        tabId,
+        scenarioId: importedWsScenario.id,
+      });
+      check('imported WebSocket scenario replays', importedReplay?.ok === true, importedReplay?.error);
+
+      await runInPage(client, extensionSession, tabId, () => {
+        window.__test.ws = null;
+        window.__test.wsDone = false;
+        window.__wsAckId = 1;
+        window.__wsScenario('core');
+        return true;
+      });
+      const importedRun = await waitForWsRun(client, extensionSession, tabId, 'the imported websocket replay');
+      check(
+        'imported WebSocket frames replay offline',
+        importedRun.raw?.hello === `hello-${wsVersion}` &&
+          importedRun.socketio?.echoed?.[1]?.version === wsVersion &&
+          importedRun.signalr?.messages?.[1]?.result?.version === wsVersion,
+        JSON.stringify({ raw: importedRun.raw?.hello, errors: importedRun.errors }),
+      );
+      await extensionCall(client, extensionSession, 'session.stop', { tabId });
+      server.state.wsEnabled = true;
+      server.state.rejectWsHttp = false;
+    }
+
     check('options page had no uncaught errors during the run', optionsErrors.length === 0, optionsErrors.join(' | '));
   } catch (error) {
     console.error(`\nE2E run aborted: ${error.message}`);
