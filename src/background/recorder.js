@@ -11,6 +11,7 @@ import { isGraphqlRequest, requestKey, requestSignature } from '../shared/matchk
 import { headersToArray } from '../shared/headers.js';
 import * as cdp from './cdp.js';
 import * as db from './db.js';
+import * as wsRecorder from './wsRecorder.js';
 
 /**
  * Large buffers keep response bodies available until we pull them at
@@ -64,6 +65,9 @@ export async function startRecording({ tabId, scenarioId, session, settings, hoo
     hooks,
     pending: new Map(),
   });
+
+  // WebSocket frames are reported by the same `Network` domain.
+  wsRecorder.start({ tabId, scenarioId, session, settings, hooks });
 }
 
 /**
@@ -76,6 +80,8 @@ export async function startRecording({ tabId, scenarioId, session, settings, hoo
 export function handleEvent(tabId, method, params) {
   const state = recordings.get(tabId);
   if (!state) return false;
+
+  if (wsRecorder.handleEvent(tabId, method, params)) return true;
 
   switch (method) {
     case 'Network.requestWillBeSent':
@@ -106,10 +112,18 @@ export async function stopRecording(tabId, { detach = true } = {}) {
   if (state) {
     recordings.delete(tabId);
     try {
+      // Finalize open WebSocket connections before the Network domain goes away.
+      await wsRecorder.stop(tabId);
+    } catch {
+      /* ignore */
+    }
+    try {
       await cdp.sendCommand(tabId, 'Network.disable');
     } catch {
       /* tab may already be gone */
     }
+  } else {
+    await wsRecorder.discard(tabId).catch(() => {});
   }
   if (detach) {
     try {

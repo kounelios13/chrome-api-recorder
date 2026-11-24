@@ -35,6 +35,11 @@ function openDb() {
       if (!database.objectStoreNames.contains(DB.BODIES)) {
         database.createObjectStore(DB.BODIES, { keyPath: 'id' });
       }
+      if (!database.objectStoreNames.contains(DB.WS_FRAMES)) {
+        const frames = database.createObjectStore(DB.WS_FRAMES, { keyPath: 'id' });
+        frames.createIndex('entryId', 'entryId', { unique: false });
+        frames.createIndex('scenarioId', 'scenarioId', { unique: false });
+      }
     };
 
     request.onsuccess = () => {
@@ -188,15 +193,30 @@ export async function restoreEntryBody(entry) {
  */
 export async function saveEntriesBulk(records) {
   const database = await openDb();
-  const transaction = database.transaction([DB.ENTRIES, DB.BODIES], 'readwrite');
+  const transaction = database.transaction([DB.ENTRIES, DB.BODIES, DB.WS_FRAMES], 'readwrite');
   const entryStore = transaction.objectStore(DB.ENTRIES);
   const bodyStore = transaction.objectStore(DB.BODIES);
+  const frameStore = transaction.objectStore(DB.WS_FRAMES);
 
   for (const record of records) {
     entryStore.put(record.entry);
-    const bodyRecord = { id: record.entry.id, body: record.body };
-    if (typeof record.originalBody === 'string') bodyRecord.originalBody = record.originalBody;
-    bodyStore.put(bodyRecord);
+    if (record.entry.kind !== 'ws') {
+      const bodyRecord = { id: record.entry.id, body: record.body };
+      if (typeof record.originalBody === 'string') bodyRecord.originalBody = record.originalBody;
+      bodyStore.put(bodyRecord);
+    }
+    if (Array.isArray(record.frames) && record.frames.length > 0) {
+      record.frames.forEach((frame, index) => {
+        const seq = Number.isFinite(Number(frame.seq)) ? Number(frame.seq) : index;
+        frameStore.put({
+          ...frame,
+          seq,
+          id: wsFrameId(record.entry.id, seq),
+          entryId: record.entry.id,
+          scenarioId: record.entry.scenarioId,
+        });
+      });
+    }
   }
 
   await transactionDone(transaction);
@@ -232,21 +252,23 @@ export async function countEntries(scenarioId) {
  */
 export async function deleteEntry(id) {
   const database = await openDb();
-  const transaction = database.transaction([DB.ENTRIES, DB.BODIES], 'readwrite');
+  const transaction = database.transaction([DB.ENTRIES, DB.BODIES, DB.WS_FRAMES], 'readwrite');
   transaction.objectStore(DB.ENTRIES).delete(id);
   transaction.objectStore(DB.BODIES).delete(id);
+  deleteWsFramesByIndex(transaction.objectStore(DB.WS_FRAMES), 'entryId', id);
   await transactionDone(transaction);
 }
 
 /**
- * Delete every recorded request (and body) of a scenario.
+ * Delete every recorded request (and body, and WS frames) of a scenario.
  * @param {string} scenarioId
  */
 export async function deleteScenario(scenarioId) {
   const database = await openDb();
-  const transaction = database.transaction([DB.ENTRIES, DB.BODIES], 'readwrite');
+  const transaction = database.transaction([DB.ENTRIES, DB.BODIES, DB.WS_FRAMES], 'readwrite');
   const entryStore = transaction.objectStore(DB.ENTRIES);
   const bodyStore = transaction.objectStore(DB.BODIES);
+  const frameStore = transaction.objectStore(DB.WS_FRAMES);
   const index = entryStore.index('scenarioId');
   const request = index.getAllKeys(IDBKeyRange.only(scenarioId));
   request.onsuccess = () => {
@@ -255,14 +277,276 @@ export async function deleteScenario(scenarioId) {
       bodyStore.delete(key);
     }
   };
+  deleteWsFramesByIndex(frameStore, 'scenarioId', scenarioId);
   await transactionDone(transaction);
 }
 
 /** Remove all recorded data (all scenarios). */
 export async function deleteAllEntries() {
   const database = await openDb();
-  const transaction = database.transaction([DB.ENTRIES, DB.BODIES], 'readwrite');
+  const transaction = database.transaction([DB.ENTRIES, DB.BODIES, DB.WS_FRAMES], 'readwrite');
   transaction.objectStore(DB.ENTRIES).clear();
   transaction.objectStore(DB.BODIES).clear();
+  transaction.objectStore(DB.WS_FRAMES).clear();
   await transactionDone(transaction);
 }
+
+// ---------------------------------------------------------------------------
+// WebSocket recordings
+// ---------------------------------------------------------------------------
+
+/**
+ * Frames are addressed by `${entryId}:${seq}` so they cascade with their entry.
+ * @param {string} entryIdValue
+ * @param {number} seq
+ */
+export function wsFrameId(entryIdValue, seq) {
+  return `${entryIdValue}:${seq}`;
+}
+
+/**
+ * Delete every WS frame that matches an index value.
+ * @param {IDBObjectStore} store
+ * @param {string} indexName
+ * @param {IDBValidKey} value
+ */
+function deleteWsFramesByIndex(store, indexName, value) {
+  const index = store.index(indexName);
+  const request = index.getAllKeys(IDBKeyRange.only(value));
+  request.onsuccess = () => {
+    for (const key of request.result) store.delete(key);
+  };
+}
+
+/**
+ * Append frames to a staging entry id. Recording flushes in batches so a
+ * service-worker restart cannot lose an entire long-lived connection; the
+ * staging rows are replaced when the connection is finalized.
+ *
+ * @param {string} stagingEntryId
+ * @param {string} scenarioId
+ * @param {object[]} frames normalized frames (see wsRecorder.js)
+ */
+export async function appendWsFrames(stagingEntryId, scenarioId, frames) {
+  if (!Array.isArray(frames) || frames.length === 0) return;
+  const database = await openDb();
+  const transaction = database.transaction(DB.WS_FRAMES, 'readwrite');
+  const store = transaction.objectStore(DB.WS_FRAMES);
+  for (const frame of frames) {
+    store.put({
+      ...frame,
+      id: wsFrameId(stagingEntryId, frame.seq),
+      entryId: stagingEntryId,
+      scenarioId,
+    });
+  }
+  await transactionDone(transaction);
+}
+
+/** @type {Map<string, Promise<any>>} per-entry save chains */
+const wsSaveQueues = new Map();
+
+/**
+ * Run a WS save after any earlier save for the same entry.
+ *
+ * Two saves for one entry can overlap (a reconnect closing while the previous
+ * connection is still being promoted). Both read the old frame keys and write
+ * replacements, so without serialization the loser can leave metadata and rows
+ * that disagree — replay would then serve a stale frame.
+ *
+ * @template T
+ * @param {string} key
+ * @param {() => Promise<T>} task
+ * @returns {Promise<T>}
+ */
+function enqueueWsSave(key, task) {
+  const previous = wsSaveQueues.get(key) ?? Promise.resolve();
+  const run = previous.then(task, task);
+  // The stored chain must never reject: a failed save's error belongs to its
+  // caller, not to an unhandled rejection or to the next save.
+  const tracked = run
+    .then(() => undefined, () => undefined)
+    .finally(() => {
+      if (wsSaveQueues.get(key) === tracked) wsSaveQueues.delete(key);
+    });
+  wsSaveQueues.set(key, tracked);
+  return run;
+}
+
+/**
+ * Persist a finished WebSocket recording.
+ *
+ * Only non-empty connections are promoted, so a reconnect that fails before
+ * receiving a single frame never overwrites a good recording ("latest
+ * non-empty wins"). Staging rows for the same connection are removed.
+ *
+ * @param {object} entry metadata (id, scenarioId, kind:'ws', matchKey, ...)
+ * @param {object[]} frames normalized frames
+ * @param {string} [stagingEntryId]
+ * @returns {Promise<boolean>} whether the recording was saved
+ */
+export async function saveWsRecording(entry, frames, stagingEntryId) {
+  if (!Array.isArray(frames) || frames.length === 0) {
+    if (stagingEntryId) await deleteWsFrames(stagingEntryId);
+    return false;
+  }
+  if (!entry?.id) throw new Error('A WebSocket recording needs an entry id.');
+  return enqueueWsSave(entry.id, () => saveWsRecordingNow(entry, frames, stagingEntryId));
+}
+
+/**
+ * @param {object} entry
+ * @param {object[]} frames
+ * @param {string} [stagingEntryId]
+ */
+async function saveWsRecordingNow(entry, frames, stagingEntryId) {
+  const database = await openDb();
+
+  // Collect the keys to clear first (read transaction), then issue deletes
+  // before the puts: IndexedDB runs requests in issue order, so deleting after
+  // the puts would remove the recording that was just written.
+  const readTransaction = database.transaction(DB.WS_FRAMES, 'readonly');
+  const readStore = readTransaction.objectStore(DB.WS_FRAMES);
+  const previousKeys = await requestToPromise(
+    readStore.index('entryId').getAllKeys(IDBKeyRange.only(entry.id)),
+  );
+  let stagedKeys = [];
+  if (stagingEntryId && stagingEntryId !== entry.id) {
+    const stagedTransaction = database.transaction(DB.WS_FRAMES, 'readonly');
+    stagedKeys = await requestToPromise(
+      stagedTransaction.objectStore(DB.WS_FRAMES).index('entryId').getAllKeys(IDBKeyRange.only(stagingEntryId)),
+    );
+  }
+
+  const transaction = database.transaction([DB.ENTRIES, DB.WS_FRAMES], 'readwrite');
+  const entryStore = transaction.objectStore(DB.ENTRIES);
+  const frameStore = transaction.objectStore(DB.WS_FRAMES);
+
+  for (const key of [...(previousKeys ?? []), ...(stagedKeys ?? [])]) frameStore.delete(key);
+  entryStore.put(entry);
+  frames.forEach((frame, index) => {
+    const seq = Number.isFinite(Number(frame.seq)) ? Number(frame.seq) : index;
+    frameStore.put({
+      ...frame,
+      seq,
+      id: wsFrameId(entry.id, seq),
+      entryId: entry.id,
+      scenarioId: entry.scenarioId,
+    });
+  });
+
+  await transactionDone(transaction);
+  return true;
+}
+
+/**
+ * Every frame of a recorded connection, in capture order.
+ * @param {string} entryIdValue
+ * @returns {Promise<object[]>}
+ */
+export async function listWsFrames(entryIdValue) {
+  const database = await openDb();
+  const transaction = database.transaction(DB.WS_FRAMES, 'readonly');
+  const index = transaction.objectStore(DB.WS_FRAMES).index('entryId');
+  const frames = await requestToPromise(index.getAll(IDBKeyRange.only(entryIdValue)));
+  return (frames ?? []).sort((left, right) => (Number(left.seq) || 0) - (Number(right.seq) || 0));
+}
+
+/**
+ * @param {string} frameId
+ * @returns {Promise<object|undefined>}
+ */
+export async function getWsFrame(frameId) {
+  const database = await openDb();
+  const transaction = database.transaction(DB.WS_FRAMES, 'readonly');
+  return requestToPromise(transaction.objectStore(DB.WS_FRAMES).get(frameId));
+}
+
+/**
+ * Persist one edited frame. Mirrors `updateEntryBody`: the first edit keeps the
+ * recorded payload so the user can restore it.
+ *
+ * @param {object} frame frame metadata (same id)
+ * @param {string} payloadBase64
+ * @returns {Promise<{hasOriginal: boolean}>}
+ */
+export async function updateWsFramePayload(frame, payloadBase64) {
+  const database = await openDb();
+  const transaction = database.transaction(DB.WS_FRAMES, 'readwrite');
+  const store = transaction.objectStore(DB.WS_FRAMES);
+
+  let hasOriginal = false;
+  const request = store.get(frame.id);
+  request.onsuccess = () => {
+    const record = request.result ?? { ...frame, payload: '' };
+    if (typeof record.originalPayload !== 'string') {
+      record.originalPayload = typeof record.payload === 'string' ? record.payload : '';
+    }
+    Object.assign(record, frame, { payload: payloadBase64 });
+    hasOriginal = typeof record.originalPayload === 'string';
+    store.put(record);
+  };
+
+  await transactionDone(transaction);
+  return { hasOriginal };
+}
+
+/**
+ * Restore a frame's recorded payload, discarding the edit.
+ * @param {object} frame frame metadata (same id)
+ * @returns {Promise<boolean>}
+ */
+export async function restoreWsFramePayload(frame) {
+  const database = await openDb();
+  const transaction = database.transaction(DB.WS_FRAMES, 'readwrite');
+  const store = transaction.objectStore(DB.WS_FRAMES);
+
+  let restored = false;
+  const request = store.get(frame.id);
+  request.onsuccess = () => {
+    const record = request.result;
+    if (!record || typeof record.originalPayload !== 'string') return;
+    record.payload = record.originalPayload;
+    delete record.originalPayload;
+    Object.assign(record, frame, { payload: record.payload });
+    store.put(record);
+    restored = true;
+  };
+
+  await transactionDone(transaction);
+  return restored;
+}
+
+/**
+ * Delete a single recorded frame.
+ * @param {string} frameId
+ */
+export async function deleteWsFrame(frameId) {
+  const database = await openDb();
+  const transaction = database.transaction(DB.WS_FRAMES, 'readwrite');
+  transaction.objectStore(DB.WS_FRAMES).delete(frameId);
+  await transactionDone(transaction);
+}
+
+/**
+ * Delete every frame of a connection (used to drop staging rows).
+ * @param {string} entryIdValue
+ */
+export async function deleteWsFrames(entryIdValue) {
+  const database = await openDb();
+  const transaction = database.transaction(DB.WS_FRAMES, 'readwrite');
+  deleteWsFramesByIndex(transaction.objectStore(DB.WS_FRAMES), 'entryId', entryIdValue);
+  await transactionDone(transaction);
+}
+
+/**
+ * Persist an entry's metadata without touching its bodies or frames.
+ * @param {object} entry
+ */
+export async function putEntry(entry) {
+  const database = await openDb();
+  const transaction = database.transaction(DB.ENTRIES, 'readwrite');
+  transaction.objectStore(DB.ENTRIES).put(entry);
+  await transactionDone(transaction);
+}
+

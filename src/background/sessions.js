@@ -138,6 +138,21 @@ function createHooks(tabId) {
       });
       scheduleFlush(tabId);
     },
+    onCapturedWs(session, entry) {
+      session.recorded += 1;
+      scheduleHostUpdate(session.scenarioId, entry.url);
+      pushFeed(tabId, {
+        kind: FEED_KIND.RECORDED,
+        method: 'WS',
+        url: entry.url,
+        status: entry.status,
+        size: entry.size,
+        at: Date.now(),
+        wsAdapter: entry.wsAdapter,
+        frameCount: entry.frameCount,
+      });
+      scheduleFlush(tabId);
+    },
     onHit(session, entry, info = {}) {
       session.hits += 1;
       pushFeed(tabId, {
@@ -412,6 +427,14 @@ export async function handleDebuggerDetached(tabId, reason) {
       session.mode === SESSION_MODE.RECORDING ? 'recording' : 'replay'
     } was stopped.`,
   );
+}
+
+/**
+ * A tab started loading a document: restart per-document replay cursors.
+ * @param {number} tabId
+ */
+export function handleTabLoad(tabId) {
+  replay.resetHandshakeCursor(tabId);
 }
 
 /**

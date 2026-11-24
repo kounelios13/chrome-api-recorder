@@ -34,7 +34,7 @@ export function buildEditedEntry(entry, bytes, { edited, editedAt = Date.now() }
  * @param {object} entry
  */
 export function summarizeEntry(entry) {
-  return {
+  const summary = {
     id: entry.id,
     method: entry.method,
     url: entry.url,
@@ -50,4 +50,15 @@ export function summarizeEntry(entry) {
     requestPreview: entry.requestPreview,
     responsePreview: entry.responsePreview,
   };
+  if (entry.kind === 'ws') {
+    summary.kind = 'ws';
+    summary.wsAdapter = entry.wsAdapter ?? 'generic';
+    summary.negotiatedProtocol = entry.negotiatedProtocol ?? '';
+    summary.frameCount = Number(entry.frameCount) || 0;
+    summary.sentCount = Number(entry.sentCount) || 0;
+    summary.recvCount = Number(entry.recvCount) || 0;
+    summary.durationMs = Number(entry.durationMs) || 0;
+    summary.truncated = Boolean(entry.truncated);
+  }
+  return summary;
 }

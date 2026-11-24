@@ -29,6 +29,13 @@ export function entrySearchText(entry) {
     entry?.size,
     entry?.requestPreview,
     entry?.responsePreview,
+    entry?.kind === 'ws' ? 'ws websocket' : '',
+    entry?.kind === 'ws' ? entry?.wsAdapter : '',
+    entry?.negotiatedProtocol,
+    entry?.frameCount,
+    entry?.sentCount,
+    entry?.recvCount,
+    entry?.durationMs,
   ]
     .map((value) => (value == null ? '' : String(value)))
     .join(' ')

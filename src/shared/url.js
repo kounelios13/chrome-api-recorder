@@ -74,3 +74,66 @@ export function isHttpUrl(rawUrl) {
     return false;
   }
 }
+
+/** @param {string} rawUrl */
+export function isWsUrl(rawUrl) {
+  try {
+    const { protocol } = new URL(rawUrl);
+    return protocol === 'ws:' || protocol === 'wss:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The endpoint a WebSocket URL points at, with the query string removed.
+ *
+ * Correlation ids, tokens and `sid`s live in the query string of most WS
+ * handshakes, so the stable part of the address is origin + path.
+ * @param {string} rawUrl
+ */
+export function wsEndpointKey(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return String(rawUrl ?? '');
+  }
+}
+
+/** @param {string} rawUrl */
+export function wsEndpointPath(rawUrl) {
+  try {
+    return new URL(rawUrl).pathname || '/';
+  } catch {
+    return String(rawUrl ?? '');
+  }
+}
+
+/**
+ * Is this WebSocket traffic GraphQL?
+ *
+ * The existing `skipGraphql` setting also hides GraphQL subscriptions, which use
+ * the `graphql-ws` / `graphql-transport-ws` sub-protocols or a URL with
+ * "graphql" in it.
+ *
+ * @param {{url: string, protocols?: string[]|string|null}} connection
+ */
+export function isGraphqlWs({ url, protocols }) {
+  const list = Array.isArray(protocols)
+    ? protocols
+    : typeof protocols === 'string' && protocols
+      ? protocols.split(',').map((item) => item.trim())
+      : [];
+  if (list.some((protocol) => /^graphql(-transport)?-ws$/i.test(String(protocol)))) return true;
+
+  try {
+    const parsed = new URL(url);
+    if (/graphql/i.test(parsed.pathname)) return true;
+    if (/graphql/i.test(parsed.search)) return true;
+  } catch {
+    return /graphql/i.test(String(url ?? ''));
+  }
+  return false;
+}
+

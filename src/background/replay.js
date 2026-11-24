@@ -15,10 +15,16 @@
  */
 import { base64ToBytes, concatBytes, utf8ToBytes } from '../shared/bytes.js';
 import { isGraphqlRequest, requestKey } from '../shared/matchkey.js';
-import { buildMatchIndexes, lookupRecording } from '../shared/matchIndex.js';
+import {
+  advanceHandshakeCursor,
+  buildMatchIndexes,
+  lookupHandshakeRecording,
+  lookupRecording,
+} from '../shared/matchIndex.js';
 import { sanitizeResponseHeaders } from '../shared/headers.js';
 import * as cdp from './cdp.js';
 import * as db from './db.js';
+import * as wsReplay from './wsReplay.js';
 
 const MAX_BODY_CACHE = 64;
 
@@ -58,6 +64,7 @@ export async function startReplay({ tabId, scenarioId, session, settings, hooks 
     indexes: buildMatchIndexes(entries),
     live: false,
     bodyCache: new Map(),
+    handshakeCursor: new Map(),
   };
   replayers.set(tabId, state);
 
@@ -71,6 +78,13 @@ export async function startReplay({ tabId, scenarioId, session, settings, hooks 
       /* ignore */
     }
     throw error;
+  }
+
+  // WebSocket replay is best effort: a failure must never block HTTP replay.
+  try {
+    await wsReplay.startReplay({ tabId, scenarioId, session, settings, hooks });
+  } catch (error) {
+    hooks.onWarning?.(session, `WebSocket replay is unavailable: ${/** @type {any} */ (error)?.message || error}`);
   }
 }
 
@@ -90,6 +104,12 @@ export async function setLive(tabId, live) {
     await enableInterception(tabId);
   }
   state.live = Boolean(live);
+
+  try {
+    await wsReplay.setLive(tabId, Boolean(live));
+  } catch {
+    /* sockets are best effort; HTTP mode is authoritative */
+  }
 }
 
 /**
@@ -100,12 +120,23 @@ export async function stopReplay(tabId, { detach = true } = {}) {
   const state = replayers.get(tabId);
   if (state) {
     replayers.delete(tabId);
+    try {
+      await wsReplay.stopReplay(tabId);
+    } catch {
+      /* ignore */
+    }
     if (!state.live) {
       try {
         await cdp.sendCommand(tabId, 'Fetch.disable');
       } catch {
         /* ignore */
       }
+    }
+  } else {
+    try {
+      await wsReplay.stopReplay(tabId);
+    } catch {
+      /* ignore */
     }
   }
   if (detach) {
@@ -132,9 +163,30 @@ export async function refreshScenario(scenarioId) {
     if (state.scenarioId !== scenarioId) continue;
     state.indexes = buildMatchIndexes(entries);
     state.bodyCache.clear();
+    state.handshakeCursor.clear();
     refreshed = true;
   }
+  try {
+    const wsRefreshed = await wsReplay.refreshScenario(scenarioId);
+    refreshed = refreshed || wsRefreshed;
+  } catch {
+    /* ignore */
+  }
   return refreshed;
+}
+
+/**
+ * Start the Socket.IO polling / SignalR negotiate cursors over.
+ *
+ * A reload replays a fresh handshake sequence, so continuing from the previous
+ * page's cursor would serve the last recorded polling response for every
+ * request.
+ *
+ * @param {number} tabId
+ */
+export function resetHandshakeCursor(tabId) {
+  const state = replayers.get(tabId);
+  if (state) state.handshakeCursor.clear();
 }
 
 /**
@@ -143,6 +195,7 @@ export async function refreshScenario(scenarioId) {
  * @param {any} params
  */
 export function handleEvent(tabId, method, params) {
+  if (wsReplay.handleEvent(tabId, method, params)) return true;
   if (method !== 'Fetch.requestPaused') return false;
 
   const state = replayers.get(tabId);
@@ -208,6 +261,23 @@ async function handlePaused(tabId, state, params) {
   }
 
   const matchKey = await requestKey({ method, url, bodyBytes: body.bytes });
+
+  // An exact method + URL + body match always wins, even for a handshake URL:
+  // the bucket cursor is only a fallback for the volatile polling sequence.
+  const exactEntry = state.indexes.exact.get(matchKey);
+  if (exactEntry) return fulfillRequest(tabId, state, requestId, request, exactEntry, 'exact');
+
+  // Socket.IO / SignalR transport handshakes are matched by canonical bucket and
+  // replayed in recorded order, so an offline client can finish its polling
+  // handshake and upgrade to WebSocket. Only when WebSocket replay is enabled.
+  if (state.settings.recordWebSockets !== false) {
+    const handshake = lookupHandshakeRecording(state.indexes, { method, url }, state.handshakeCursor);
+    if (handshake) {
+      advanceHandshakeCursor(state.handshakeCursor, handshake.key);
+      return fulfillRequest(tabId, state, requestId, request, handshake.entry, 'handshake');
+    }
+  }
+
   const lookup = lookupRecording(state.indexes, { method, url, matchKey }, { smartFallback });
 
   if (!lookup.entry) {

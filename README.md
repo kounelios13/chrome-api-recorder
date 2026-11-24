@@ -54,8 +54,13 @@ fulfills requests at the network layer, so no page-side monkey-patching is invol
 - **GraphQL excluded** — GraphQL-looking requests (URL contains `graphql`, a `query` parameter, or a
   body containing a GraphQL `query`/`mutation`) are never recorded or replayed; they always go live.
   Can be toggled in Settings.
-- **Only fetch/XHR** — documents, scripts, stylesheets, images, fonts, media, EventSource and
-  WebSocket traffic are never recorded (and are only briefly paused during replay, then forwarded).
+- **WebSockets (opt-in per setting, on by default)** — `ws://` / `wss://` connections are recorded
+  frame by frame and replayed from an injected MAIN-world `WebSocket` shim. Protocol adapters add
+  first-class **Socket.IO** (Engine.IO v3/v4) and **ASP.NET Core SignalR** (JSON) support: handshakes,
+  `\x1e` framing, ping/pong keepalives and ack / `invocationId` rewriting. Editing a frame in
+  Settings → Scenarios → *Frames* changes what replay delivers.
+- **Only XHR/fetch and WebSockets** — documents, scripts, stylesheets, images, fonts, media and
+  EventSource are never recorded.
 
 ## Install (unpacked, developer mode)
 
@@ -127,8 +132,11 @@ src/
     service-worker.js  message router + chrome event wiring + state snapshot
     sessions.js        one session per tab, badge/broadcasts/recovery, engine hooks
     recorder.js        passive CDP Network recorder
+    wsRecorder.js      passive CDP Network.webSocket* recorder
     replay.js          CDP Fetch interceptor + fulfill/continue
-    db.js              IndexedDB metadata + response body stores
+    wsReplay.js        CDP Page/Runtime bridge + WebSocket timeline playback
+    wsShim.js          injectable MAIN-world WebSocket shim
+    db.js              IndexedDB metadata, response body and WS frame stores
     store.js           chrome.storage for sites/scenarios/settings
     sites.js           optional host permissions + dynamic content-script registration
     cdp.js             chrome.debugger wrapper with friendly errors
@@ -138,9 +146,51 @@ src/
   options/             settings page: sites, settings, scenario management
   shared/              pure helpers: match keys, URL normalization, headers, patterns, entry bodies,
                        scenario hosts, import/export format, filters, messages
+    wsAdapters/        Socket.IO / SignalR / generic protocol adapters
+    wsReplayPlan.js    pure WS timeline compiler + frame matcher
 test/unit/             Node test runner tests for the pure logic
 test/e2e/              real Chrome for Testing end-to-end suite
 ```
+
+### WebSocket replay
+
+CDP can record WebSockets natively but cannot intercept them, so replay uses a two-part bridge:
+
+- `Page.addScriptToEvaluateOnNewDocument` installs a MAIN-world `WebSocket` wrapper before any page
+  script runs (CSP/Trusted-Types safe, and scoped to the replayed tab), and `Runtime.addBinding`
+  gives that wrapper a private channel back to the service worker. The binding is captured and
+  deleted immediately so page code cannot call it.
+- Each recorded connection is compiled into a plan: frames the server sent before the first client
+  frame are delivered on open, every client frame is a trigger whose recorded server frames are
+  replayed with relative timing, and unmatched sockets pass straight through to the native
+  `WebSocket`.
+- **Timing** is configurable in Settings: *capped* keeps the recorded ordering but limits every
+  delay (`Max frame delay`, default 1500 ms), *exact* uses the recorded delays, *instant* delivers
+  immediately.
+- **Keepalives are synthesized** so replayed clients never time out: Engine.IO v4 pings, Engine.IO v3
+  pong replies, SignalR `{"type":6}` server pings.
+- **Go live** closes mocked sockets with code `1001` (Going Away), so Socket.IO / SignalR reconnect
+  on their own and the reconnecting socket passes through to the real server.
+- **Per-frame routing**: sockets are keyed by execution context plus connection id, so a widget in a
+  same-origin iframe replays independently instead of colliding with the top frame. Every page
+  command targets the frame that owns the socket, and a frame on another origin is refused scenario
+  data even inside the same target. A frame that has no recorded reply is reported to the page as an
+  `error` event (and to the popup diagnostics) rather than vanishing silently.
+- **Replay state is per session**: each start uses a fresh, unguessable binding name, and the shim
+  replaces a stale install, so stopping and restarting replay, switching scenarios or recovering
+  after a service-worker restart works without reloading the page.
+- **Offline HTTP handshake**: Socket.IO polling (`GET/POST /socket.io/?EIO=…&transport=polling`) and
+  SignalR `/negotiate` requests are matched by a canonical bucket that ignores the `t` cache-buster
+  and replays the recorded polling sequence in order, so a scenario can replay with no backend
+  running.
+- **Latest non-empty connection wins**: re-recording the same endpoint replaces the previous
+  recording only when the new connection captured at least one frame.
+
+WebSocket frame recording is bounded: frames above 1 MB, connections above 20 MB or 2000 frames are
+marked truncated instead of exhausting storage. GraphQL sockets (`graphql-ws`,
+`graphql-transport-ws`, or a URL containing `graphql`) follow the existing GraphQL exclusion toggle;
+the sub-protocol is read from the handshake request, because `Network.webSocketCreated` does not
+report it.
 
 ### Matching rules
 
@@ -169,8 +219,14 @@ setting for strict exact matching.
 ## Data & privacy
 
 Everything is stored locally in the extension (`chrome.storage.local` for metadata, IndexedDB for
-recorded bodies; `unlimitedStorage` is requested so scenarios are not size-constrained). Nothing is
-uploaded anywhere. Deleting a scenario permanently removes its recorded data.
+recorded bodies and WebSocket frames; `unlimitedStorage` is requested so scenarios are not
+size-constrained). Nothing is uploaded anywhere. Deleting a scenario permanently removes its
+recorded data.
+
+Scenario exports include **WebSocket frame payloads verbatim** — these routinely contain session
+tokens, `sid`s and user data, just like response bodies do. Treat an exported file as sensitive, and
+redact it before pasting it into an issue. Avoid recording third-party WebSocket traffic on
+production credentials if that matters to you.
 
 ## Limitations / troubleshooting
 
@@ -178,9 +234,21 @@ uploaded anywhere. Deleting a scenario permanently removes its recorded data.
   per tab). Close DevTools for that tab and retry. Other debugger extensions conflict too.
 - The **debugger infobar** is shown while a session is active; that is Chrome's requirement for the
   Debugger API.
-- Recording covers `fetch` and `XMLHttpRequest` of the page and its frames. Requests made by service
-  workers or dedicated workers are not captured. WebSockets are out of scope. EventSource responses
-  are skipped.
+- Recording covers `fetch`/`XMLHttpRequest` and WebSockets of the page and its frames. Traffic made
+  by service workers or dedicated workers is not captured (the WebSocket shim is injected into
+  window contexts only). EventSource responses are skipped.
+- **WebSocket replay** cannot adopt sockets that were opened *before* replay started — reload the
+  page (or let the app reconnect) after pressing *Start replay*. The same applies to *recording*:
+  only connections created after recording starts are captured. Binary frames (SignalR MessagePack,
+  Socket.IO binary attachments, raw binary sockets) round-trip byte for byte but cannot be edited as
+  text or field-rewritten in v1. A connection is only replaced in storage when the new recording
+  contains at least one frame, so a failed reconnect cannot erase a good capture.
+- **Cross-process iframes are not intercepted.** Replay script and the page bridge are attached to
+  the replayed tab's target; a cross-site iframe runs in its own target, so its sockets keep using
+  the native WebSocket and can reach the real network during an "offline" replay. Same-origin
+  iframes are covered. Related: WebSocket recordings are keyed on origin + path only, so two sockets
+  on the same endpoint that differ only in query string (for example different `sid` or tenant
+  tokens) share one recording and the latest capture wins.
 - Cross-origin requests still perform their CORS preflight against the real server; recorded CORS
   headers are replayed so the actual request/response works offline from the recording.
 - Navigating a recording/replay tab to a site that is not allowlisted stops the session (recorded
@@ -227,7 +295,14 @@ and options pages load without uncaught errors. The payload editor is exercised 
 Settings UI: the recorded response is edited, replay serves the edited bytes, the original is restored
 from the dialog, and the next replay serves the original again. Smart fallback is covered as well:
 an ambiguous request is left live while an unambiguous URL/path match is replayed from storage, and
-the popup/debug-report diagnostics are validated (83 checks).
+the popup/debug-report diagnostics are validated.
+
+The WebSocket paths run against the same fixture server's RFC 6455 implementation, a Socket.IO
+polling + upgrade sequence and a SignalR hub: recording stores one entry per protocol, offline replay
+serves all three with upgrades refused (zero network hits), GraphQL sockets stay live, the frame
+timeline can be edited and restored through the service-worker API, and Live mode passes sockets
+through. The fixture protocols are also unit-tested without Chrome (`test/unit/wsFixtures.test.js`),
+so a failing e2e run points at the extension rather than the fixture (107 checks).
 
 ## License
 
