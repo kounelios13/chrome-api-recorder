@@ -40,7 +40,11 @@ export function splitSignalRMessages(text) {
  * @param {string[]} messages
  */
 export function joinSignalRMessages(messages) {
-  const parts = (Array.isArray(messages) ? messages : []).map((message) => String(message ?? '')).filter(Boolean);
+  const parts = (Array.isArray(messages) ? messages : [])
+    // Messages may retain their separator when they come straight from a
+    // keepalive or a handshake; never double-terminate them.
+    .map((message) => String(message ?? '').replace(/\u001e+$/, ''))
+    .filter(Boolean);
   return parts.length === 0 ? '' : `${parts.join(RECORD_SEPARATOR)}${RECORD_SEPARATOR}`;
 }
 

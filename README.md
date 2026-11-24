@@ -171,6 +171,10 @@ CDP can record WebSockets natively but cannot intercept them, so replay uses a t
   pong replies, SignalR `{"type":6}` server pings.
 - **Go live** closes mocked sockets with code `1001` (Going Away), so Socket.IO / SignalR reconnect
   on their own and the reconnecting socket passes through to the real server.
+- **Per-frame routing**: sockets are keyed by execution context plus connection id, so a widget in a
+  same-origin iframe replays independently instead of colliding with the top frame. A frame that has
+  no recorded reply is reported to the page as an `error` event (and to the popup diagnostics) rather
+  than vanishing silently.
 - **Offline HTTP handshake**: Socket.IO polling (`GET/POST /socket.io/?EIO=…&transport=polling`) and
   SignalR `/negotiate` requests are matched by a canonical bucket that ignores the `t` cache-buster
   and replays the recorded polling sequence in order, so a scenario can replay with no backend
@@ -209,8 +213,14 @@ setting for strict exact matching.
 ## Data & privacy
 
 Everything is stored locally in the extension (`chrome.storage.local` for metadata, IndexedDB for
-recorded bodies; `unlimitedStorage` is requested so scenarios are not size-constrained). Nothing is
-uploaded anywhere. Deleting a scenario permanently removes its recorded data.
+recorded bodies and WebSocket frames; `unlimitedStorage` is requested so scenarios are not
+size-constrained). Nothing is uploaded anywhere. Deleting a scenario permanently removes its
+recorded data.
+
+Scenario exports include **WebSocket frame payloads verbatim** — these routinely contain session
+tokens, `sid`s and user data, just like response bodies do. Treat an exported file as sensitive, and
+redact it before pasting it into an issue. Avoid recording third-party WebSocket traffic on
+production credentials if that matters to you.
 
 ## Limitations / troubleshooting
 
@@ -222,10 +232,17 @@ uploaded anywhere. Deleting a scenario permanently removes its recorded data.
   by service workers or dedicated workers is not captured (the WebSocket shim is injected into
   window contexts only). EventSource responses are skipped.
 - **WebSocket replay** cannot adopt sockets that were opened *before* replay started — reload the
-  page (or let the app reconnect) after pressing *Start replay*. Binary frames (SignalR MessagePack,
-  Socket.IO binary attachments, raw binary sockets) are recorded and replayed byte-for-byte but
-  cannot be edited as text or field-rewritten in v1. A connection is only replaced in storage when
-  the new recording contains at least one frame, so a failed reconnect cannot erase a good capture.
+  page (or let the app reconnect) after pressing *Start replay*. The same applies to *recording*:
+  only connections created after recording starts are captured. Binary frames (SignalR MessagePack,
+  Socket.IO binary attachments, raw binary sockets) round-trip byte for byte but cannot be edited as
+  text or field-rewritten in v1. A connection is only replaced in storage when the new recording
+  contains at least one frame, so a failed reconnect cannot erase a good capture.
+- **Cross-process iframes are not intercepted.** Replay script and the page bridge are attached to
+  the replayed tab's target; a cross-site iframe runs in its own target, so its sockets keep using
+  the native WebSocket and can reach the real network during an "offline" replay. Same-origin
+  iframes are covered. Related: WebSocket recordings are keyed on origin + path only, so two sockets
+  on the same endpoint that differ only in query string (for example different `sid` or tenant
+  tokens) share one recording and the latest capture wins.
 - Cross-origin requests still perform their CORS preflight against the real server; recorded CORS
   headers are replayed so the actual request/response works offline from the recording.
 - Navigating a recording/replay tab to a site that is not allowlisted stops the session (recorded

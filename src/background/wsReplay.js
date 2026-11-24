@@ -20,8 +20,10 @@ import { adapterByName } from '../shared/wsAdapters/index.js';
 import {
   compileReplayPlan,
   deliveryDelay,
+  frameTextForDelivery,
   matchReplayStep,
   prepareResponses,
+  socketKey,
   synthesizeSocketIoConnect,
 } from '../shared/wsReplayPlan.js';
 import * as cdp from './cdp.js';
@@ -63,6 +65,8 @@ export async function startReplay({ tabId, scenarioId, session, settings, hooks 
     entriesById: new Map(entries.map((entry) => [entry.id, entry])),
     live: false,
     sockets: new Map(),
+    /** @type {Set<number>} every execution context that talked to us */
+    contexts: new Set(),
     scriptIdentifier: null,
     timers: new Set(),
   };
@@ -105,9 +109,17 @@ export async function setLive(tabId, live) {
   if (live) {
     // 1001 = Going Away: Socket.IO and SignalR reconnect on their own, and the
     // reconnecting socket passes through because `live` is set.
-    await evaluate(tabId, wsShimCommand('closeAll', [1001, 'Replay stopped'])).catch(() => {});
-    for (const socket of state.sockets.values()) clearSocketTimers(socket);
+    for (const socket of state.sockets.values()) {
+      clearSocketTimers(socket);
+      void evaluate(
+        tabId,
+        wsShimCommand('closeSocket', [socket.connId, 1001, 'Replay stopped']),
+        socket.contextId,
+      ).catch(() => {});
+    }
     state.sockets.clear();
+    // Sockets in a context we never heard from still belong to the document.
+    await evaluate(tabId, wsShimCommand('closeAll', [1001, 'Replay stopped'])).catch(() => {});
   }
 }
 
@@ -143,12 +155,18 @@ async function teardown(tabId, state, { keepDebugger = false } = {}) {
       /* page may be gone */
     }
   }
+  // Restore the native constructor in every frame we touched, not just the
+  // main one.
+  for (const contextId of state.contexts) {
+    await evaluate(tabId, wsShimCommand('reset', []), contextId).catch(() => {});
+  }
   try {
     await evaluate(tabId, wsShimCommand('reset', []));
     await cdp.sendCommand(tabId, 'Runtime.removeBinding', { name: WS_BRIDGE_NAME });
   } catch {
     /* ignore */
   }
+  state.contexts.clear();
   if (!keepDebugger) {
     // The HTTP replay engine owns detaching; nothing to do here.
   }
@@ -212,15 +230,35 @@ export function handleEvent(tabId, method, params) {
 
   if (method === 'Runtime.bindingCalled') {
     if (params?.name !== WS_BRIDGE_NAME) return false;
-    void onBindingPayload(tabId, state, params?.payload).catch((error) => {
-      state.hooks?.onWarning?.(state.session, `WebSocket replay error: ${error.message}`);
-    });
+    const contextId = Number(params?.executionContextId);
+    if (Number.isFinite(contextId)) state.contexts.add(contextId);
+    void onBindingPayload(tabId, state, params?.payload, Number.isFinite(contextId) ? contextId : null).catch(
+      (error) => {
+        state.hooks?.onWarning?.(state.session, `WebSocket replay error: ${error.message}`);
+      },
+    );
     return true;
   }
 
-  if (method === 'Runtime.executionContextDestroyed' || method === 'Runtime.executionContextsCleared') {
+  if (method === 'Runtime.executionContextsCleared') {
+    // The whole document is gone: every socket in it is dead.
     for (const socket of state.sockets.values()) clearSocketTimers(socket);
     state.sockets.clear();
+    state.contexts.clear();
+    return true;
+  }
+
+  if (method === 'Runtime.executionContextDestroyed') {
+    // Only that frame went away. Clearing every socket would silently stop
+    // replay for the rest of the page (an iframe navigating is enough).
+    const destroyed = Number(params?.executionContextId);
+    if (!Number.isFinite(destroyed)) return true;
+    state.contexts.delete(destroyed);
+    for (const [key, socket] of [...state.sockets]) {
+      if (socket.contextId !== destroyed) continue;
+      clearSocketTimers(socket);
+      state.sockets.delete(key);
+    }
     return true;
   }
 
@@ -232,7 +270,7 @@ export function handleEvent(tabId, method, params) {
  * @param {object} state
  * @param {string} payload
  */
-async function onBindingPayload(tabId, state, payload) {
+async function onBindingPayload(tabId, state, payload, contextId) {
   let message;
   try {
     message = JSON.parse(String(payload ?? ''));
@@ -243,13 +281,13 @@ async function onBindingPayload(tabId, state, payload) {
 
   switch (message.cmd) {
     case 'open':
-      await onOpen(tabId, state, message);
+      await onOpen(tabId, state, message, contextId);
       return;
     case 'send':
-      await onSend(tabId, state, message);
+      await onSend(tabId, state, message, contextId);
       return;
     case 'close':
-      closeSocket(state, message.connId);
+      closeSocket(state, contextId, message.connId);
       return;
     default:
   }
@@ -260,10 +298,11 @@ async function onBindingPayload(tabId, state, payload) {
  * @param {object} state
  * @param {{connId:string, url:string, protocols?:string[]}} message
  */
-async function onOpen(tabId, state, message) {
+async function onOpen(tabId, state, message, contextId) {
   const connId = String(message.connId ?? '');
   const url = String(message.url ?? '');
   const protocols = Array.isArray(message.protocols) ? message.protocols.map(String) : [];
+  const key = socketKey(contextId, connId);
 
   const passthrough = async (reason, detail = {}) => {
     if (reason) {
@@ -273,7 +312,7 @@ async function onOpen(tabId, state, message) {
         { reason, sameUrl: detail.samePath ?? 0, samePath: detail.samePath ?? 0 },
       );
     }
-    await evaluate(tabId, wsShimCommand('openResult', [connId, { mock: false }])).catch(() => {});
+    await evaluate(tabId, wsShimCommand('openResult', [connId, { mock: false }]), contextId).catch(() => {});
   };
 
   if (state.live) return passthrough(null);
@@ -294,6 +333,8 @@ async function onOpen(tabId, state, message) {
 
   const socket = {
     connId,
+    contextId,
+    key,
     entryId: lookup.entry.id,
     url,
     adapter,
@@ -303,7 +344,7 @@ async function onOpen(tabId, state, message) {
     keepaliveStop: null,
     closed: false,
   };
-  state.sockets.set(connId, socket);
+  state.sockets.set(key, socket);
 
   await evaluate(
     tabId,
@@ -311,6 +352,7 @@ async function onOpen(tabId, state, message) {
       connId,
       { mock: true, protocol: lookup.entry.negotiatedProtocol || protocols[0] || '' },
     ]),
+    contextId,
   );
 
   state.hooks?.onHit?.(state.session, lookup.entry, { matchedVia: lookup.matchedVia ?? 'exact' });
@@ -358,8 +400,8 @@ function buildKeepaliveContext(socket, url, entry) {
  * @param {object} state
  * @param {{connId:string, opcode?:number, text?:string, base64?:string}} message
  */
-async function onSend(tabId, state, message) {
-  const socket = state.sockets.get(String(message.connId ?? ''));
+async function onSend(tabId, state, message, contextId) {
+  const socket = state.sockets.get(socketKey(contextId, message.connId));
   if (!socket || socket.closed) return;
 
   const opcode = Number(message.opcode) === 2 ? 2 : 1;
@@ -394,6 +436,13 @@ async function onSend(tabId, state, message) {
       { method: 'WS', url: socket.url },
       { reason: 'ws-frame-unmatched', sameUrl: socket.plan.steps.length, samePath: socket.plan.steps.length },
     );
+    // Surface it in the page as well: a silently swallowed frame leaves
+    // callers awaiting an ack that will never arrive.
+    await evaluate(
+      tabId,
+      wsShimCommand('error', [socket.connId, 'No recorded reply for this WebSocket frame']),
+      socket.contextId,
+    ).catch(() => {});
     return;
   }
 
@@ -422,7 +471,11 @@ function scheduleDelivery(tabId, state, socket, frame, delay) {
     if (socket.closed) return;
     const send =
       Number(frame.opcode) === 2
-        ? evaluate(tabId, wsShimCommand('deliver', [socket.connId, 2, null, frame.base64 ?? '']))
+        ? evaluate(
+            tabId,
+            wsShimCommand('deliver', [socket.connId, 2, null, frame.base64 ?? '']),
+            socket.contextId,
+          )
         : deliverText(tabId, socket, String(frame.text ?? ''));
     void send.catch(() => {});
   };
@@ -441,16 +494,20 @@ function scheduleDelivery(tabId, state, socket, frame, delay) {
 
 /** @param {number} tabId @param {object} socket @param {string} text */
 function deliverText(tabId, socket, text) {
-  return evaluate(tabId, wsShimCommand('deliver', [socket.connId, 1, text, null]));
+  // Plans hold logical messages; restore the protocol framing (SignalR's
+  // record separator) on the way out.
+  const payload = frameTextForDelivery(socket.adapter.name, text);
+  return evaluate(tabId, wsShimCommand('deliver', [socket.connId, 1, payload, null]), socket.contextId);
 }
 
-/** @param {object} state @param {string} connId */
-function closeSocket(state, connId) {
-  const socket = state.sockets.get(String(connId ?? ''));
+/** @param {object} state @param {number|null} contextId @param {string} connId */
+function closeSocket(state, contextId, connId) {
+  const key = socketKey(contextId, connId);
+  const socket = state.sockets.get(key);
   if (!socket) return;
   socket.closed = true;
   clearSocketTimers(socket);
-  state.sockets.delete(socket.connId);
+  state.sockets.delete(key);
 }
 
 /** @param {object} socket */
@@ -472,10 +529,9 @@ function clearSocketTimers(socket) {
  * @param {number} tabId
  * @param {string} expression
  */
-async function evaluate(tabId, expression) {
-  return cdp.sendCommand(tabId, 'Runtime.evaluate', {
-    expression,
-    silent: true,
-    returnByValue: true,
-  });
+async function evaluate(tabId, expression, executionContextId = null) {
+  /** @type {any} */
+  const params = { expression, silent: true, returnByValue: true };
+  if (Number.isFinite(Number(executionContextId))) params.contextId = Number(executionContextId);
+  return cdp.sendCommand(tabId, 'Runtime.evaluate', params);
 }

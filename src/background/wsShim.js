@@ -33,7 +33,24 @@ function wsShimMain(bridgeName, symbolKey) {
 
   const scope = globalThis;
   const installKey = Symbol.for(symbolKey);
-  if (scope[installKey]) return;
+
+  // Re-installing in the same document (stop -> start, scenario switch after a
+  // service-worker restart) must replace the previous shim: its captured
+  // binding is dead, and bailing out here would silently leave sockets on the
+  // native constructor.
+  const previous = scope[installKey];
+  if (previous) {
+    try {
+      previous.closeAll(1001, 'Replay restarted');
+    } catch {
+      /* old shim may already be broken */
+    }
+    try {
+      delete scope[installKey];
+    } catch {
+      /* ignore */
+    }
+  }
 
   const NativeWebSocket = scope.WebSocket;
   if (typeof NativeWebSocket !== 'function') return;
@@ -238,6 +255,11 @@ function wsShimMain(bridgeName, symbolKey) {
       fire(this, 'message', { type: 'message', data, origin: '', lastEventId: '' });
     }
 
+    /** @param {string} message */
+    __error(message) {
+      fire(this, 'error', { type: 'error', message });
+    }
+
     /** @param {number} code @param {string} reason */
     __closeFromServer(code, reason) {
       const state = this.__state;
@@ -382,12 +404,23 @@ function wsShimMain(bridgeName, symbolKey) {
         socket.__closeFromServer(code, reason);
       }
     },
+    error(connId, message) {
+      const socket = sockets.get(String(connId));
+      if (socket) socket.__error(String(message || 'WebSocket replay error'));
+    },
     reset() {
       for (const socket of [...sockets.values()]) {
         if (socket.__state.native) continue;
         socket.__closeFromServer(1001, 'Replay stopped');
       }
       scope.WebSocket = NativeWebSocket;
+      // Leave no installed-shim marker behind: the next install must rebuild
+      // the bridge, not bail out on a stale symbol.
+      try {
+        delete scope[installKey];
+      } catch {
+        /* ignore */
+      }
     },
     socketCount() {
       return sockets.size;

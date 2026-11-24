@@ -105,6 +105,28 @@ export function wsUrlKey(url) {
   return `WS ${normalizeUrl(url)}`;
 }
 
+/**
+ * The WS endpoint a SignalR `/negotiate` request belongs to, if any.
+ *
+ * `POST https://host/hub/negotiate` negotiates for `wss://host/hub`. Used to
+ * avoid treating unrelated `/negotiate` endpoints as WebSocket handshakes.
+ *
+ * @param {string} rawUrl
+ * @returns {string|null} a `wsPathKey`-style endpoint, or null
+ */
+export function wsEndpointForNegotiate(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (!/\/negotiate\/?$/i.test(parsed.pathname)) return null;
+  const path = parsed.pathname.replace(/\/negotiate\/?$/i, '') || '/';
+  const wsProtocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `WS ${wsProtocol}//${parsed.host}${path}`;
+}
+
 /** @param {string} url */
 export function wsPathKey(url) {
   return `WS ${wsEndpointKey(url)}`;
@@ -177,6 +199,15 @@ export function lookupWsRecording(indexes, connection) {
 export function lookupHandshakeRecording(indexes, request, cursor) {
   const key = handshakeKey(request?.method, request?.url);
   if (!key) return null;
+
+  // A `/negotiate` call is only a WebSocket handshake when this scenario also
+  // recorded the hub socket it negotiates for; otherwise it is ordinary HTTP
+  // and must go through normal matching.
+  if (/\/negotiate$/i.test(key)) {
+    const endpoint = wsEndpointForNegotiate(request?.url);
+    if (!endpoint || !indexes.byPath?.has(endpoint)) return null;
+  }
+
   const bucket = indexes.byHandshake.get(key) ?? [];
   if (bucket.length === 0) return null;
 

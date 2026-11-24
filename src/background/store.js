@@ -122,6 +122,10 @@ export function sanitizeSettings(input) {
   if (Number.isFinite(maxFrames)) {
     out.wsMaxFramesPerConnection = Math.min(Math.max(Math.round(maxFrames), 10), 100000);
   }
+  const maxFrameBytes = Number(/** @type {any} */ (input).wsMaxFrameBytes);
+  if (Number.isFinite(maxFrameBytes)) {
+    out.wsMaxFrameBytes = Math.min(Math.max(Math.round(maxFrameBytes), 64 * 1024), 16 * 1024 * 1024);
+  }
   return out;
 }
 

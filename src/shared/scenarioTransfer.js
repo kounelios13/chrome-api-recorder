@@ -21,6 +21,9 @@ export const SCENARIO_EXPORT_VERSION = 2;
 /** Documents written by older versions are still importable. */
 const SUPPORTED_IMPORT_VERSIONS = [1, 2];
 
+/** Upper bound for one scenario's imported payload (bodies + WS frames). */
+export const MAX_IMPORT_BYTES = 200 * 1024 * 1024;
+
 const EXPORTED_ENTRY_FIELDS = [
   'kind',
   'matchKey',
@@ -232,13 +235,33 @@ function normalizeScenarioSection(section, { now, maxBodyBytes }) {
 
   const records = [];
   const skipped = [];
+  let totalBytes = 0;
+  let exhausted = false;
 
   section.entries.forEach((raw, index) => {
+    if (exhausted) {
+      skipped.push({ index, reason: 'the export is larger than the import limit' });
+      return;
+    }
     const normalized = normalizeImportedEntry(raw, { now, maxBodyBytes });
     if (normalized.error) {
       skipped.push({ index, reason: normalized.error });
       return;
     }
+
+    // Per-entry caps are not enough for WS scenarios: 2000 frames at the body
+    // limit is unbounded memory in the options page.
+    const entryBytes =
+      normalized.entry.kind === 'ws'
+        ? (normalized.frames ?? []).reduce((sum, frame) => sum + (Number(frame.size) || 0), 0)
+        : Number(normalized.entry.size) || 0;
+    if (totalBytes + entryBytes > MAX_IMPORT_BYTES) {
+      exhausted = true;
+      skipped.push({ index, reason: 'the export is larger than the import limit' });
+      return;
+    }
+
+    totalBytes += entryBytes;
     records.push(normalized);
   });
 

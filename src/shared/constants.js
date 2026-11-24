@@ -110,6 +110,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   wsMaxFrameDelayMs: 1500,
   /** Hard limit on recorded frames per WebSocket connection. */
   wsMaxFramesPerConnection: 2000,
+  /** Largest single recorded WebSocket frame (bytes). */
+  wsMaxFrameBytes: 1024 * 1024,
 });
 
 export const LIMITS = Object.freeze({

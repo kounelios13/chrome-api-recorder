@@ -176,6 +176,20 @@ export async function refreshScenario(scenarioId) {
 }
 
 /**
+ * Start the Socket.IO polling / SignalR negotiate cursors over.
+ *
+ * A reload replays a fresh handshake sequence, so continuing from the previous
+ * page's cursor would serve the last recorded polling response for every
+ * request.
+ *
+ * @param {number} tabId
+ */
+export function resetHandshakeCursor(tabId) {
+  const state = replayers.get(tabId);
+  if (state) state.handshakeCursor.clear();
+}
+
+/**
  * @param {number} tabId
  * @param {string} method
  * @param {any} params

@@ -4,7 +4,7 @@
  * Owns the message API for the popup, options page and the in-page HUD, wires
  * Chrome events to the engines and recovers sessions after a restart.
  */
-import { LIMITS, MSG } from '../shared/constants.js';
+import { DEFAULT_SETTINGS, LIMITS, MSG } from '../shared/constants.js';
 import { base64ToBytes, bytesToBase64, bytesToUtf8, looksLikeText, utf8ToBytes } from '../shared/bytes.js';
 import { buildEditedEntry, summarizeEntry } from '../shared/entryBody.js';
 import { isHttpUrl } from '../shared/url.js';
@@ -78,6 +78,9 @@ chrome.tabs.onReplaced.addListener((_addedTabId, removedTabId) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === 'loading') {
+    void ready.then(() => sessions.handleTabLoad(tabId)).catch(() => {});
+  }
   if (!changeInfo.url) return;
   void ready
     .then(() => sessions.handleTabUrlChange(tabId, changeInfo.url))
@@ -384,11 +387,13 @@ async function dispatch(message, sender) {
 
       const settings = await store.getSettings();
       const bytes = utf8ToBytes(message.text);
-      if (bytes.length > settings.maxBodyBytes) {
+      const frameLimit =
+        Number(settings.wsMaxFrameBytes) || DEFAULT_SETTINGS.wsMaxFrameBytes;
+      if (bytes.length > frameLimit) {
         throw new Error(
           `This frame is ${formatBytes(bytes.length)}, above the ${formatBytes(
-            settings.maxBodyBytes,
-          )} limit. Raise “Max response size” in Settings first.`,
+            frameLimit,
+          )} WebSocket frame limit.`,
         );
       }
 

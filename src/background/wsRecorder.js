@@ -13,7 +13,7 @@
  * overwrites a good recording.
  */
 import { DEFAULT_SETTINGS, LIMITS } from '../shared/constants.js';
-import { bytesToBase64, utf8ToBytes } from '../shared/bytes.js';
+import { decodeCdpFramePayload } from '../shared/wsFrames.js';
 import { wsConnectionKey } from '../shared/matchkey.js';
 import { isGraphqlWs, shortUrl } from '../shared/url.js';
 import { detectAdapter } from '../shared/wsAdapters/index.js';
@@ -197,27 +197,27 @@ function onFrame(state, params, direction) {
 
   const settings = state.settings ?? {};
   const response = params?.response ?? {};
-  const opcode = Number(response.opcode) === 2 ? 2 : 1;
-  const payloadText = typeof response.payloadData === 'string' ? response.payloadData : '';
-  const payloadBytes = utf8ToBytes(payloadText);
+  const frame = decodeCdpFramePayload(response.opcode, response.payloadData);
+  const opcode = frame.opcode;
 
-  const maxFrameBytes = Number(settings.wsMaxFrameBytes) || LIMITS.MAX_WS_FRAME_BYTES;
+  const maxFrameBytes =
+    Number(settings.wsMaxFrameBytes) || DEFAULT_SETTINGS.wsMaxFrameBytes || LIMITS.MAX_WS_FRAME_BYTES;
   const maxFrames = Number(settings.wsMaxFramesPerConnection) || DEFAULT_SETTINGS.wsMaxFramesPerConnection;
 
   if (connection.frames.length >= maxFrames) {
     warnOnce(state, connection, `WebSocket ${shortUrl(connection.url)} stopped recording after ${maxFrames} frames.`);
     return;
   }
-  if (payloadBytes.length > maxFrameBytes) {
+  if (frame.size > maxFrameBytes) {
     connection.truncated = true;
     warnOnce(
       state,
       connection,
-      `A ${payloadBytes.length}-byte WebSocket frame was skipped (limit ${maxFrameBytes} bytes).`,
+      `A ${frame.size}-byte WebSocket frame was skipped (limit ${maxFrameBytes} bytes).`,
     );
     return;
   }
-  if (connection.bytes + payloadBytes.length > LIMITS.MAX_WS_CONNECTION_BYTES) {
+  if (connection.bytes + frame.size > LIMITS.MAX_WS_CONNECTION_BYTES) {
     connection.truncated = true;
     warnOnce(
       state,
@@ -227,21 +227,26 @@ function onFrame(state, params, direction) {
     return;
   }
 
-  if (opcode === 1) {
-    if (direction === 'send' && connection.firstSentFrame == null) connection.firstSentFrame = payloadText;
-    if (direction === 'recv' && connection.firstRecvFrame == null) connection.firstRecvFrame = payloadText;
+  if (opcode === 1 && frame.text != null) {
+    if (direction === 'send' && connection.firstSentFrame == null) connection.firstSentFrame = frame.text;
+    if (direction === 'recv' && connection.firstRecvFrame == null) connection.firstRecvFrame = frame.text;
   }
+
+  const timestampMs = Number(params?.timestamp);
+  const offsetMs = Number.isFinite(timestampMs) && timestampMs > 0
+    ? Math.max(0, Math.round(timestampMs * 1000 - connection.openedAt))
+    : Math.max(0, Date.now() - connection.openedAt);
 
   connection.frames.push({
     seq: connection.frames.length,
     direction,
     opcode,
-    offsetMs: Math.max(0, Date.now() - connection.openedAt),
-    size: payloadBytes.length,
-    payload: bytesToBase64(payloadBytes),
+    offsetMs,
+    size: frame.size,
+    payload: frame.payload,
     edited: false,
   });
-  connection.bytes += payloadBytes.length;
+  connection.bytes += frame.size;
 
   // Mirror frames to IndexedDB in batches (crash insurance).
   const pending = connection.frames.length - connection.stagedCount;
@@ -260,12 +265,18 @@ function onFrame(state, params, direction) {
 
 /** @param {TabState} state @param {object} connection */
 function flush(state, connection) {
+  if (connection.finalized) return;
   if (connection.frames.length <= connection.stagedCount) return;
   const frames = connection.frames.slice(connection.stagedCount);
   connection.stagedCount = connection.frames.length;
-  void db.appendWsFrames(connection.stagingEntryId, state.scenarioId, frames).catch(() => {
-    /* staging is best-effort */
-  });
+  connection.pendingFlush = db
+    .appendWsFrames(connection.stagingEntryId, state.scenarioId, frames)
+    .catch(() => {
+      /* staging is best-effort */
+    })
+    .finally(() => {
+      connection.pendingFlush = null;
+    });
 }
 
 /** @param {TabState} state @param {object} connection @param {string} message */
@@ -307,6 +318,9 @@ function onClosed(state, params) {
  * @returns {Promise<boolean>} whether a recording was saved
  */
 async function finalize(state, connection, { reason = 'stopped' } = {}) {
+  connection.finalized = true;
+  if (connection.pendingFlush) await connection.pendingFlush.catch(() => {});
+
   const frames = connection.frames;
   if (frames.length === 0) {
     await dropStaging(connection);

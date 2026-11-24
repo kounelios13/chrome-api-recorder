@@ -4,9 +4,11 @@ import assert from 'node:assert/strict';
 import {
   compileReplayPlan,
   deliveryDelay,
+  frameTextForDelivery,
   matchReplayStep,
   normalizeFrames,
   prepareResponses,
+  socketKey,
   synthesizeSocketIoConnect,
 } from '../../src/shared/wsReplayPlan.js';
 import { adapterByName } from '../../src/shared/wsAdapters/index.js';
@@ -139,4 +141,36 @@ test('Socket.IO namespace connects are synthesized when no recorded reply exists
   assert.equal(synthesizeSocketIoConnect('40'), '40{"sid":"replay-sid"}');
   assert.equal(synthesizeSocketIoConnect('40/admin,'), '40/admin,{"sid":"replay-sid"}');
   assert.equal(synthesizeSocketIoConnect('42["x"]'), null);
+});
+
+
+test('SignalR messages regain their record separator on delivery', () => {
+  const message = '{"type":3,"invocationId":"1","result":"ok"}';
+  assert.equal(frameTextForDelivery('signalr', message), `${message}\u001e`);
+  // Keepalives already carry the separator; never double-terminate them.
+  assert.equal(frameTextForDelivery('signalr', '{"type":6}\u001e'), '{"type":6}\u001e');
+  assert.equal(frameTextForDelivery('socketio', '42["hi"]'), '42["hi"]');
+  assert.equal(frameTextForDelivery('generic', '{"a":1}'), '{"a":1}');
+});
+
+test('a compiled SignalR plan delivers terminated frames', () => {
+  const plan = planFor(
+    [
+      { seq: 0, direction: 'send', opcode: 1, offsetMs: 0, text: '{"type":1,"invocationId":"1","target":"Ping","arguments":[]}\u001e' },
+      { seq: 1, direction: 'recv', opcode: 1, offsetMs: 2, text: '{"type":3,"invocationId":"1","result":"pong"}\u001e' },
+    ],
+    'signalr',
+  );
+  const delivered = plan.steps[0].responses.map((response) =>
+    frameTextForDelivery(plan.adapter, response.text ?? ''),
+  );
+  assert.equal(delivered[0], '{"type":3,"invocationId":"1","result":"pong"}\u001e');
+  assert.equal(delivered[0].endsWith('\u001e'), true);
+});
+
+test('socket keys keep identical per-frame connection ids apart', () => {
+  // The shim numbers sockets per execution context, so every frame reports ws-1.
+  assert.notEqual(socketKey(11, 'ws-1'), socketKey(12, 'ws-1'));
+  assert.equal(socketKey(11, 'ws-1'), socketKey(11, 'ws-1'));
+  assert.equal(socketKey(null, 'ws-1'), 'main:ws-1');
 });

@@ -249,6 +249,40 @@ export function deliveryDelay({ timing = 'capped', maxDelayMs = 1500 } = {}, tri
 }
 
 /**
+ * Render a logical message as the text a recorded frame must deliver.
+ *
+ * Plans hold logical messages (SignalR frames are split on `\x1e`), so the
+ * protocol's framing has to be restored on the way out. Socket.IO and generic
+ * adapters are pass-through; SignalR appends the record separator.
+ *
+ * @param {string} adapterName
+ * @param {string} message
+ * @returns {string}
+ */
+export function frameTextForDelivery(adapterName, message) {
+  const impl = adapterByName(adapterName);
+  try {
+    return impl.joinMessages([String(message ?? '')]);
+  } catch {
+    return String(message ?? '');
+  }
+}
+
+/**
+ * Registry key for a mocked socket.
+ *
+ * `connId` is only unique inside one execution context (the shim's counter is
+ * per frame), so the context id must take part in the key or subframe sockets
+ * overwrite each other and get answered with the wrong recording.
+ *
+ * @param {number|string|null|undefined} executionContextId
+ * @param {string} connId
+ */
+export function socketKey(executionContextId, connId) {
+  return `${executionContextId == null ? 'main' : String(executionContextId)}:${String(connId ?? '')}`;
+}
+
+/**
  * Synthesize the reply to a Socket.IO namespace connect (`40`) when the
  * recording has no connect exchange (e.g. only raw WS frames were captured).
  *

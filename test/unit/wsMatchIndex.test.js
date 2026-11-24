@@ -7,6 +7,7 @@ import {
   handshakeKey,
   lookupHandshakeRecording,
   lookupWsRecording,
+  wsEndpointForNegotiate,
   wsPathKey,
 } from '../../src/shared/matchIndex.js';
 import { wsConnectionKey } from '../../src/shared/matchkey.js';
@@ -122,4 +123,39 @@ test('lookupWsRecording reports a missing recording clearly', () => {
   const indexes = buildMatchIndexes([]);
   const result = lookupWsRecording(indexes, { url: 'wss://api.test/ws', matchKey: null });
   assert.equal(result.reason, 'ws-no-recording');
+});
+
+
+test('SignalR negotiate is only treated as a WS handshake when the hub was recorded', () => {
+  const negotiate = httpEntry(
+    'neg',
+    'POST',
+    'https://api.test/hub/negotiate?negotiateVersion=1',
+    'n'.repeat(64),
+    10,
+  );
+  const hub = wsEntry('hub', 'wss://api.test/hub?access_token=abc', 'h'.repeat(64), 20);
+
+  const withHub = buildMatchIndexes([negotiate, hub]);
+  const hit = lookupHandshakeRecording(
+    withHub,
+    { method: 'POST', url: 'https://api.test/hub/negotiate?negotiateVersion=1' },
+    new Map(),
+  );
+  assert.equal(hit?.entry.id, 'neg');
+
+  // A scenario with no recorded hub keeps ordinary matching for /negotiate.
+  const withoutHub = buildMatchIndexes([negotiate]);
+  const miss = lookupHandshakeRecording(
+    withoutHub,
+    { method: 'POST', url: 'https://api.test/hub/negotiate?negotiateVersion=1' },
+    new Map(),
+  );
+  assert.equal(miss, null);
+});
+
+test('wsEndpointForNegotiate maps the negotiate path to the hub endpoint', () => {
+  assert.equal(wsEndpointForNegotiate('https://api.test/hub/negotiate'), 'WS wss://api.test/hub');
+  assert.equal(wsEndpointForNegotiate('http://localhost:3000/chat/negotiate?x=1'), 'WS ws://localhost:3000/chat');
+  assert.equal(wsEndpointForNegotiate('https://api.test/api/items'), null);
 });

@@ -430,6 +430,14 @@ export async function handleDebuggerDetached(tabId, reason) {
 }
 
 /**
+ * A tab started loading a document: restart per-document replay cursors.
+ * @param {number} tabId
+ */
+export function handleTabLoad(tabId) {
+  replay.resetHandshakeCursor(tabId);
+}
+
+/**
  * Stop a session when the tab navigates outside the allowlist.
  * @param {number} tabId
  * @param {string} url

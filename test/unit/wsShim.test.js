@@ -209,3 +209,41 @@ test('wsShimCommand targets the symbol-keyed command surface', () => {
   assert.match(expression, /Symbol\.for\("api-recorder\.ws"\)/);
   assert.match(expression, /deliver\("ws-1", 1, "hi", null\)/);
 });
+
+
+test('re-installing after reset restores the mock and re-captures the bridge', () => {
+  const { sandbox, calls, api } = loadShim();
+  const first = new sandbox.WebSocket('wss://api.test/one');
+  api.openResult(first.__state.id, { mock: true });
+  assert.equal(calls.filter((call) => call.cmd === 'open').length, 1);
+
+  // stopReplay(): reset + removeBinding, then startReplay(): addBinding + re-evaluate.
+  api.reset();
+  assert.equal(sandbox.WebSocket, FakeNativeWebSocket);
+  sandbox[WS_BRIDGE_NAME] = (payload) => calls.push(JSON.parse(payload));
+  vm.runInContext(WS_SHIM_SOURCE, sandbox, { filename: 'wsShim.js' });
+  const reinstalled = vm.runInContext(
+    `globalThis[Symbol.for(${JSON.stringify(WS_SHIM_SYMBOL)})]`,
+    sandbox,
+  );
+
+  assert.notEqual(sandbox.WebSocket, FakeNativeWebSocket, 'shim must be installed again');
+  assert.notEqual(reinstalled, api, 'a fresh command surface must own the new bridge');
+  const second = new sandbox.WebSocket('wss://api.test/two');
+  assert.equal(calls.filter((call) => call.cmd === 'open').length, 2);
+  reinstalled.openResult(second.__state.id, { mock: true });
+  assert.equal(second.readyState, 1);
+});
+
+test('the in-page error command surfaces unmatched frames without closing', () => {
+  const { sandbox, calls, api } = loadShim();
+  const socket = new sandbox.WebSocket('wss://api.test/ws');
+  api.openResult(calls[0].connId, { mock: true });
+
+  const errors = [];
+  socket.addEventListener('error', (event) => errors.push(event.message));
+  api.error(calls[0].connId, 'no recorded reply');
+
+  assert.deepEqual(errors, ['no recorded reply']);
+  assert.equal(socket.readyState, 1);
+});
