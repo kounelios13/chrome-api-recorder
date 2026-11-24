@@ -341,6 +341,32 @@ async function waitForPageRun(client, extensionSession, tabId, label, timeoutMs 
 }
 
 /**
+ * Wait for `window.__wsScenario` to finish and return its results.
+ * @param {import('./cdp-client.mjs').CdpClient} client
+ * @param {string} extensionSession
+ * @param {number} tabId
+ * @param {string} label
+ * @param {number} [timeoutMs]
+ */
+async function waitForWsRun(client, extensionSession, tabId, label, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const snapshot = await runInPage(client, extensionSession, tabId, () => ({
+        done: Boolean(window.__test && window.__test.wsDone),
+        ws: window.__test ? window.__test.ws : null,
+      }));
+      if (snapshot && snapshot.done) return snapshot.ws ?? { errors: [] };
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(120);
+  }
+  throw new Error(`Timed out waiting for ${label}${lastError ? ` (${lastError.message})` : ''}`);
+}
+
+/**
  * Reload the fixture page and wait until the new document finished its run.
  * @param {import('./cdp-client.mjs').CdpClient} client
  * @param {string} extensionSession
@@ -786,7 +812,7 @@ async function main() {
     check(
       'export document identifies itself',
       exportResponse?.data?.format === 'api-recorder-scenario' &&
-        exportResponse?.data?.formatVersion === 1 &&
+        exportResponse?.data?.formatVersion === 2 &&
         typeof exportResponse?.fileName === 'string',
       JSON.stringify({
         format: exportResponse?.data?.format,
@@ -852,7 +878,7 @@ async function main() {
       'export all produces a self-describing collection document',
       exportAllResponse?.ok === true &&
         exportAllResponse.data?.format === 'api-recorder-scenarios' &&
-        exportAllResponse.data?.formatVersion === 1 &&
+        exportAllResponse.data?.formatVersion === 2 &&
         typeof exportAllResponse?.fileName === 'string',
       JSON.stringify({
         format: exportAllResponse?.data?.format,
@@ -1329,6 +1355,197 @@ async function main() {
     const stateAfterDelete = await extensionCall(client, extensionSession, 'state.get', { tabId });
     const scenarioAfterDelete = (stateAfterDelete?.scenarios ?? []).find((item) => item.id === scenarioId);
     check('the scenario count updates after the deletion', scenarioAfterDelete?.entryCount === 3, JSON.stringify(scenarioAfterDelete?.entryCount));
+    // ---- WebSocket recording, offline replay, frame editing and live mode.
+    const wsScenarioResponse = await extensionCall(client, extensionSession, 'scenario.create', {
+      name: 'E2E websockets',
+      host: `127.0.0.1:${server.port}`,
+    });
+    const wsScenarioId = wsScenarioResponse?.scenario?.id;
+    check('websocket scenario created', Boolean(wsScenarioId), wsScenarioResponse?.error);
+
+    const wsVersion = server.state.version;
+    const wsRecording = await extensionCall(client, extensionSession, 'session.startRecording', {
+      tabId,
+      scenarioId: wsScenarioId,
+    });
+    check('websocket recording started', wsRecording?.ok === true, wsRecording?.error);
+
+    await runInPage(client, extensionSession, tabId, () => {
+      window.__test.ws = null;
+      window.__test.wsDone = false;
+      window.__wsScenario('all');
+      return true;
+    });
+    const recordedWs = await waitForWsRun(client, extensionSession, tabId, 'the recorded websocket run');
+    check('websocket fixtures had no page errors while recording', (recordedWs.errors ?? []).length === 0, (recordedWs.errors ?? []).join('; '));
+    check(
+      'raw websocket echo is exercised end to end',
+      recordedWs.raw?.hello === `hello-${wsVersion}` &&
+        recordedWs.raw?.echo === 'echo:ping' &&
+        JSON.stringify(recordedWs.raw?.binary) === '[1,2,3]',
+      JSON.stringify(recordedWs.raw),
+    );
+    check(
+      'Socket.IO polling + upgrade is exercised end to end',
+      recordedWs.socketio?.probe === '3probe' &&
+        recordedWs.socketio?.welcome?.[1]?.version === wsVersion &&
+        recordedWs.socketio?.echoed?.[1]?.id === 7,
+      JSON.stringify(recordedWs.socketio),
+    );
+    check(
+      'SignalR negotiate + batched replies are exercised end to end',
+      recordedWs.signalr?.token === true &&
+        recordedWs.signalr?.handshake === '{}' + String.fromCharCode(30) &&
+        recordedWs.signalr?.messages?.[0]?.type === 2 &&
+        recordedWs.signalr?.messages?.[1]?.type === 3 &&
+        recordedWs.signalr?.messages?.[1]?.result?.version === wsVersion,
+      JSON.stringify(recordedWs.signalr),
+    );
+
+    await extensionCall(client, extensionSession, 'session.stop', { tabId });
+    const wsEntriesResponse = await extensionCall(client, extensionSession, 'scenario.entries', {
+      scenarioId: wsScenarioId,
+      limit: 50,
+    });
+    const wsEntries = (wsEntriesResponse?.entries ?? []).filter((entry) => entry.kind === 'ws');
+    const wsByAdapter = Object.fromEntries(wsEntries.map((entry) => [entry.wsAdapter, entry]));
+    check(
+      'recording stores one entry per websocket protocol',
+      wsEntries.length === 3 && wsByAdapter.socketio && wsByAdapter.signalr && wsByAdapter.generic,
+      JSON.stringify(wsEntries.map((entry) => ({ url: entry.url, adapter: entry.wsAdapter, frames: entry.frameCount }))),
+    );
+    check(
+      'recorded websocket entries carry frame counters',
+      wsEntries.every((entry) => Number(entry.frameCount) > 0 && Number(entry.sentCount) + Number(entry.recvCount) === Number(entry.frameCount)),
+      JSON.stringify(wsEntries.map((entry) => ({ adapter: entry.wsAdapter, frames: entry.frameCount }))),
+    );
+    check(
+      'GraphQL websocket traffic is excluded from recording',
+      !wsEntries.some((entry) => String(entry.url).includes('/graphql')),
+      JSON.stringify(wsEntries.map((entry) => entry.url)),
+    );
+
+    // Offline replay: bump the server, refuse upgrades, and expect the
+    // recordings to answer all three protocols without a single upgrade.
+    server.state.version = `${wsVersion}-next`;
+    server.state.wsEnabled = false;
+    const upgradesBeforeReplay = server.state.upgrades;
+    const wsReplay = await extensionCall(client, extensionSession, 'session.startReplay', {
+      tabId,
+      scenarioId: wsScenarioId,
+    });
+    check('websocket replay started', wsReplay?.ok === true, wsReplay?.error);
+
+    await runInPage(client, extensionSession, tabId, () => {
+      window.__test.ws = null;
+      window.__test.wsDone = false;
+      window.__wsScenario('core');
+      return true;
+    });
+    const replayedWs = await waitForWsRun(client, extensionSession, tabId, 'the replayed websocket run');
+    check('websocket replay had no page errors', (replayedWs.errors ?? []).length === 0, (replayedWs.errors ?? []).join('; '));
+    check(
+      'replayed raw websocket serves the recording while the server is offline',
+      replayedWs.raw?.hello === `hello-${wsVersion}` &&
+        replayedWs.raw?.echo === 'echo:ping' &&
+        JSON.stringify(replayedWs.raw?.binary) === '[1,2,3]',
+      JSON.stringify(replayedWs.raw),
+    );
+    check(
+      'replayed Socket.IO handshake and upgrade work offline',
+      replayedWs.socketio?.probe === '3probe' &&
+        replayedWs.socketio?.welcome?.[1]?.version === wsVersion &&
+        replayedWs.socketio?.echoed?.[1]?.version === wsVersion,
+      JSON.stringify(replayedWs.socketio),
+    );
+    check(
+      'replayed SignalR handshake and invocation work offline',
+      replayedWs.signalr?.messages?.[1]?.result?.version === wsVersion &&
+        replayedWs.signalr?.messages?.[1]?.invocationId === '9',
+      JSON.stringify(replayedWs.signalr),
+    );
+    check(
+      'websocket replay touched the network zero times',
+      server.state.upgrades === upgradesBeforeReplay,
+      `before=${upgradesBeforeReplay} after=${server.state.upgrades}`,
+    );
+
+    // GraphQL sockets are excluded, so they still go live during replay.
+    server.state.wsEnabled = true;
+    const upgradesBeforeGraphql = server.state.upgrades;
+    await runInPage(client, extensionSession, tabId, () => {
+      window.__test.ws = null;
+      window.__test.wsDone = false;
+      window.__wsScenario('graphql');
+      return true;
+    });
+    const graphqlWs = await waitForWsRun(client, extensionSession, tabId, 'the GraphQL websocket run');
+    check(
+      'GraphQL websocket still goes live during replay',
+      graphqlWs.graphql?.greeting === `graphql-${server.state.version}` &&
+        server.state.upgrades === upgradesBeforeGraphql + 1,
+      JSON.stringify({ greeting: graphqlWs.graphql?.greeting, upgrades: server.state.upgrades }),
+    );
+
+    // Frame editing: change the recorded greeting and expect replay to serve it.
+    const rawEntry = wsByAdapter.generic;
+    const framesResponse = await extensionCall(client, extensionSession, 'scenario.ws.frames', {
+      scenarioId: wsScenarioId,
+      entryId: rawEntry.id,
+    });
+    const helloFrame = (framesResponse?.frames ?? []).find(
+      (frame) => frame.direction === 'recv' && typeof frame.text === 'string' && frame.text.startsWith('hello-'),
+    );
+    check(
+      'websocket frame timeline is exposed to the UI',
+      framesResponse?.ok === true && (framesResponse?.frames ?? []).length > 0 && Boolean(helloFrame),
+      JSON.stringify({ frames: (framesResponse?.frames ?? []).length }),
+    );
+
+    const editFrame = await extensionCall(client, extensionSession, 'scenario.ws.frame.update', {
+      scenarioId: wsScenarioId,
+      entryId: rawEntry.id,
+      frameId: helloFrame?.id,
+      text: 'edited-hello',
+    });
+    check('websocket frame edit is saved', editFrame?.ok === true && editFrame?.frame?.text === 'edited-hello', editFrame?.error);
+
+    await runInPage(client, extensionSession, tabId, () => {
+      window.__test.ws = null;
+      window.__test.wsDone = false;
+      window.__wsScenario('raw');
+      return true;
+    });
+    const editedWs = await waitForWsRun(client, extensionSession, tabId, 'the replayed edited frame');
+    check('replay serves the edited websocket frame', editedWs.raw?.hello === 'edited-hello', JSON.stringify(editedWs.raw));
+
+    const restoreFrame = await extensionCall(client, extensionSession, 'scenario.ws.frame.update', {
+      scenarioId: wsScenarioId,
+      entryId: rawEntry.id,
+      frameId: helloFrame?.id,
+      restoreOriginal: true,
+    });
+    check('websocket frame restore brings back the recorded payload', restoreFrame?.frame?.text === `hello-${wsVersion}`, JSON.stringify(restoreFrame?.frame));
+
+    // Live mode: mocked sockets close (1001) and new sockets reach the server.
+    server.state.version = `${wsVersion}-live`;
+    const upgradesBeforeLive = server.state.upgrades;
+    await extensionCall(client, extensionSession, 'session.setLive', { tabId, live: true });
+    await runInPage(client, extensionSession, tabId, () => {
+      window.__test.ws = null;
+      window.__test.wsDone = false;
+      window.__wsScenario('raw');
+      return true;
+    });
+    const liveWs = await waitForWsRun(client, extensionSession, tabId, 'the live websocket run');
+    check(
+      'live mode passes websockets through to the real server',
+      liveWs.raw?.hello === `hello-${server.state.version}` &&
+        server.state.upgrades === upgradesBeforeLive + 1,
+      JSON.stringify({ hello: liveWs.raw?.hello, upgrades: server.state.upgrades }),
+    );
+
+    await extensionCall(client, extensionSession, 'session.stop', { tabId });
     check('options page had no uncaught errors during the run', optionsErrors.length === 0, optionsErrors.join(' | '));
   } catch (error) {
     console.error(`\nE2E run aborted: ${error.message}`);

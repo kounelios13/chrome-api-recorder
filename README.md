@@ -295,7 +295,14 @@ and options pages load without uncaught errors. The payload editor is exercised 
 Settings UI: the recorded response is edited, replay serves the edited bytes, the original is restored
 from the dialog, and the next replay serves the original again. Smart fallback is covered as well:
 an ambiguous request is left live while an unambiguous URL/path match is replayed from storage, and
-the popup/debug-report diagnostics are validated (83 checks).
+the popup/debug-report diagnostics are validated.
+
+The WebSocket paths run against the same fixture server's RFC 6455 implementation, a Socket.IO
+polling + upgrade sequence and a SignalR hub: recording stores one entry per protocol, offline replay
+serves all three with upgrades refused (zero network hits), GraphQL sockets stay live, the frame
+timeline can be edited and restored through the service-worker API, and Live mode passes sockets
+through. The fixture protocols are also unit-tested without Chrome (`test/unit/wsFixtures.test.js`),
+so a failing e2e run points at the extension rather than the fixture (107 checks).
 
 ## License
 
