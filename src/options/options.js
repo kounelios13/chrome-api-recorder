@@ -12,6 +12,7 @@ import { normalizeSiteInput } from '../shared/patterns.js';
 import { shortUrl } from '../shared/url.js';
 import { normalizeScenarioName } from '../shared/scenarios.js';
 import { filterEntries } from '../shared/filterEntries.js';
+import { adapterByName } from '../shared/wsAdapters/index.js';
 import {
   collectSuggestedTargetOrigins,
   defaultCopyScenarioName,
@@ -59,6 +60,9 @@ const state = {
   /** @type {Scenario|null} */
   copyingScenario: null,
   copyNameDirty: false,
+  /** @type {null|{scenarioId:string, entry:any, frames:any[], selectedId:string|null, direction:string, filter:string, confirmDeleteId:string|null, confirmRestoreId:string|null}} */
+  wsTimeline: null,
+  wsConfirmTimer: 0,
   /** @type {string[]} */
   copyOriginSuggestions: [],
   /** @type {string[]} */
@@ -144,11 +148,22 @@ function normalizeScenarios(value) {
 function normalizeSettings(value) {
   const merged = { ...DEFAULT_SETTINGS, ...(value && typeof value === 'object' ? value : {}) };
   const bytes = Number(merged.maxBodyBytes);
+  const maxDelay = Number(merged.wsMaxFrameDelayMs);
   return {
     maxBodyBytes: Number.isFinite(bytes) && bytes > 0 ? bytes : DEFAULT_SETTINGS.maxBodyBytes,
     skipGraphql: merged.skipGraphql !== false,
     replayCookies: merged.replayCookies === true,
     smartFallback: merged.smartFallback !== false,
+    recordWebSockets: merged.recordWebSockets !== false,
+    wsReplayTiming: ['capped', 'original', 'instant'].includes(merged.wsReplayTiming)
+      ? merged.wsReplayTiming
+      : DEFAULT_SETTINGS.wsReplayTiming,
+    wsMaxFrameDelayMs:
+      Number.isFinite(maxDelay) && maxDelay >= 0 ? maxDelay : DEFAULT_SETTINGS.wsMaxFrameDelayMs,
+    wsMaxFramesPerConnection:
+      Number(merged.wsMaxFramesPerConnection) > 0
+        ? Math.trunc(Number(merged.wsMaxFramesPerConnection))
+        : DEFAULT_SETTINGS.wsMaxFramesPerConnection,
   };
 }
 
@@ -178,6 +193,9 @@ function cacheDom() {
     'skip-graphql',
     'smart-fallback',
     'replay-cookies',
+    'record-ws',
+    'ws-replay-timing',
+    'ws-max-frame-delay',
     'save-settings',
     'reset-settings',
     'settings-saved',
@@ -212,6 +230,24 @@ function cacheDom() {
     'entry-editor-restore',
     'entry-editor-save',
     'payload-editor',
+    'ws-frames-dialog',
+    'ws-frames-meta',
+    'ws-frames-request',
+    'ws-frames-close',
+    'ws-frames-direction',
+    'ws-frames-filter',
+    'ws-frames-count',
+    'ws-frames-list',
+    'ws-frame-detail-empty',
+    'ws-frame-editor-wrap',
+    'ws-frame-detail-meta',
+    'ws-frame-editor',
+    'ws-frame-hint',
+    'ws-frame-error',
+    'ws-frame-pretty',
+    'ws-frame-restore',
+    'ws-frame-delete',
+    'ws-frame-save',
     'copy-scenario-dialog',
     'copy-scenario-form',
     'copy-scenario-meta',
@@ -271,6 +307,30 @@ function wireEvents() {
   });
   dom.entryEditor.addEventListener('click', (event) => {
     if (event.target === dom.entryEditor) closeEditor();
+  });
+
+  dom.wsFramesClose.addEventListener('click', closeWsTimeline);
+  dom.wsFramesDirection.addEventListener('change', () => {
+    if (!state.wsTimeline) return;
+    state.wsTimeline.direction = dom.wsFramesDirection.value;
+    renderWsFrames();
+  });
+  dom.wsFramesFilter.addEventListener('input', () => {
+    if (!state.wsTimeline) return;
+    state.wsTimeline.filter = dom.wsFramesFilter.value;
+    renderWsFrames();
+  });
+  dom.wsFrameSave.addEventListener('click', onSaveWsFrame);
+  dom.wsFrameRestore.addEventListener('click', onRestoreWsFrame);
+  dom.wsFrameDelete.addEventListener('click', onDeleteWsFrame);
+  dom.wsFramePretty.addEventListener('click', onPrettyPrintWsFrame);
+  dom.wsFrameEditor.addEventListener('input', updateWsFrameHint);
+  dom.wsFramesDialog.addEventListener('close', () => {
+    state.wsTimeline = null;
+    clearTimeout(state.wsConfirmTimer);
+  });
+  dom.wsFramesDialog.addEventListener('click', (event) => {
+    if (event.target === dom.wsFramesDialog) closeWsTimeline();
   });
 
   dom.copyScenarioForm.addEventListener('submit', onCopyScenarioSubmit);
@@ -538,6 +598,13 @@ function renderSettings() {
   dom.skipGraphql.checked = state.settings.skipGraphql !== false;
   dom.smartFallback.checked = state.settings.smartFallback !== false;
   dom.replayCookies.checked = state.settings.replayCookies === true;
+  dom.recordWs.checked = state.settings.recordWebSockets !== false;
+  dom.wsReplayTiming.value = state.settings.wsReplayTiming ?? DEFAULT_SETTINGS.wsReplayTiming;
+  dom.wsMaxFrameDelay.value = String(
+    Number.isFinite(state.settings.wsMaxFrameDelayMs)
+      ? state.settings.wsMaxFrameDelayMs
+      : DEFAULT_SETTINGS.wsMaxFrameDelayMs,
+  );
   hideFieldError(dom.settingsFieldError);
 }
 
@@ -555,11 +622,22 @@ async function onSaveSettings(event) {
     return;
   }
 
+  const rawDelay = String(dom.wsMaxFrameDelay.value ?? '').trim();
+  const maxDelay = Number(rawDelay);
+  if (!rawDelay || !Number.isFinite(maxDelay) || maxDelay < 0 || maxDelay > 60000) {
+    showFieldError(dom.settingsFieldError, 'Enter a WebSocket frame delay between 0 and 60000 ms.');
+    dom.wsMaxFrameDelay.focus();
+    return;
+  }
+
   const settings = {
     maxBodyBytes: Math.round(megabytes * MB),
     skipGraphql: dom.skipGraphql.checked,
     smartFallback: dom.smartFallback.checked,
     replayCookies: dom.replayCookies.checked,
+    recordWebSockets: dom.recordWs.checked,
+    wsReplayTiming: dom.wsReplayTiming.value,
+    wsMaxFrameDelayMs: Math.round(maxDelay),
   };
   const saved = await persistSettings(settings, dom.saveSettings);
   if (saved) showSaved('Settings saved');
@@ -1344,6 +1422,7 @@ function clearEntriesFilter() {
 
 /** @param {any} entry */
 function renderEntryRow(entry) {
+  if (entry?.kind === 'ws') return renderWsEntryRow(entry);
   const method = String(entry?.method ?? 'GET').toUpperCase();
   const status = Number(entry?.status);
   const hasStatus = Number.isFinite(status) && status > 0;
@@ -1415,9 +1494,428 @@ function renderEntryRow(entry) {
   );
 }
 
+/**
+ * One row of the recorded-requests table for a recorded WebSocket connection.
+ * @param {any} entry
+ */
+function renderWsEntryRow(entry) {
+  const adapterLabel = wsAdapterLabel(entry.wsAdapter);
+  const url = shortUrl(entry?.url ?? '');
+  const frames = Number(entry?.frameCount) || 0;
+  const sent = Number(entry?.sentCount) || 0;
+  const recv = Number(entry?.recvCount) || 0;
+  const duration = formatDuration(entry?.durationMs);
+  const captured = formatTimestamp(entry?.capturedAt);
+  const truncated = entry?.truncated === true;
+
+  const methodCell = el('td', { class: 'entry-method' }, 'WS');
+  methodCell.append(el('span', { class: 'ws-adapter-badge', title: `Protocol adapter: ${adapterLabel}` }, adapterLabel));
+  if (entry?.edited) {
+    methodCell.append(
+      el('span', { class: 'entry-edited-badge', title: `Frames edited ${formatTimestamp(entry?.editedAt)}` }, 'edited'),
+    );
+  }
+
+  const framesButton = el(
+    'button',
+    {
+      class: 'btn btn-ghost btn-sm',
+      type: 'button',
+      'data-testid': `ws-frames-${entry.id}`,
+      'aria-label': `Open the WebSocket frame timeline for ${url || entry?.url || ''}`,
+      title: 'Inspect and edit the recorded frames',
+    },
+    'Frames',
+  );
+  framesButton.addEventListener('click', () => openWsTimeline(entry.id, framesButton));
+
+  const deleteConfirming = state.entryDeleteId === entry.id;
+  const deleteButton = el(
+    'button',
+    {
+      class: `btn btn-sm ${deleteConfirming ? 'btn-danger' : 'btn-ghost'} entry-delete-btn`,
+      type: 'button',
+      'data-testid': `delete-entry-${entry.id}`,
+      title: deleteConfirming ? 'Click again to delete' : 'Delete this recorded connection',
+    },
+    trashIcon(),
+  );
+  if (deleteConfirming) deleteButton.append(' Confirm delete?');
+  deleteButton.addEventListener('click', () => onDeleteEntryClicked(entry));
+
+  const statusCell = el(
+    'td',
+    { class: 'entry-status entry-status-ok', title: 'WebSocket handshake status' },
+    String(Number(entry?.status) || 101),
+  );
+
+  const preview = `${sent}↑ ${recv}↓${duration ? ` · ${duration}` : ''}${truncated ? ' · truncated' : ''}`;
+
+  return el(
+    'tr',
+    {},
+    methodCell,
+    statusCell,
+    el('td', { class: 'entry-url', title: String(entry?.url ?? '') }, url || '—'),
+    el('td', { class: 'entry-size' }, formatBytes(entry?.size)),
+    el('td', { class: 'entry-time' }, captured),
+    el(
+      'td',
+      { class: 'entry-preview', title: `${frames} recorded frame${frames === 1 ? '' : 's'}` },
+      `${preview} · ${frames} frame${frames === 1 ? '' : 's'}`,
+    ),
+    el('td', { class: 'entry-actions' }, framesButton, deleteButton),
+  );
+}
+
+/** @param {unknown} adapter */
+function wsAdapterLabel(adapter) {
+  switch (String(adapter ?? 'generic')) {
+    case 'socketio':
+      return 'Socket.IO';
+    case 'signalr':
+      return 'SignalR';
+    default:
+      return 'WS';
+  }
+}
+
+/** @param {unknown} value */
+function formatDuration(value) {
+  const ms = Number(value);
+  if (!Number.isFinite(ms) || ms <= 0) return '';
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)} s`;
+  return `${Math.round(ms / 60000)} min`;
+}
+
+/* ------------------------------------------------------------------ */
+/* WebSocket frame timeline                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @param {string} entryId
+ * @param {HTMLButtonElement} button
+ */
+async function openWsTimeline(entryId, button) {
+  if (!state.entriesScenarioId) return;
+  if (dom.wsFramesDialog.open) dom.wsFramesDialog.close();
+  hideError();
+  setBusy(button, true);
+  try {
+    const response = await send(MSG.WS_FRAMES_GET, { scenarioId: state.entriesScenarioId, entryId });
+    const entry = response?.entry;
+    if (!entry) throw new Error('Could not load that WebSocket recording.');
+
+    state.wsTimeline = {
+      scenarioId: state.entriesScenarioId,
+      entry,
+      frames: Array.isArray(response.frames) ? response.frames : [],
+      selectedId: null,
+      direction: 'all',
+      filter: '',
+      confirmDeleteId: null,
+      confirmRestoreId: null,
+    };
+    dom.wsFramesDirection.value = 'all';
+    dom.wsFramesFilter.value = '';
+    renderWsTimeline();
+    dom.wsFramesDialog.showModal();
+  } catch (error) {
+    showError(errorMessage(error, 'Could not load the WebSocket timeline.'));
+  } finally {
+    if (button.isConnected) setBusy(button, false);
+  }
+}
+
+function renderWsTimeline() {
+  const timeline = state.wsTimeline;
+  if (!timeline) return;
+  const { entry, frames } = timeline;
+  const sent = frames.filter((frame) => frame.direction === 'send').length;
+
+  dom.wsFramesMeta.textContent = [
+    wsAdapterLabel(entry.wsAdapter),
+    entry.negotiatedProtocol ? `protocol ${entry.negotiatedProtocol}` : '',
+    `${frames.length} frame${frames.length === 1 ? '' : 's'} (${sent}↑ ${frames.length - sent}↓)`,
+    formatDuration(entry.durationMs),
+    entry.truncated ? 'truncated' : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  dom.wsFramesRequest.textContent = String(entry.url || '');
+  dom.wsFramesRequest.title = String(entry.url || '');
+  renderWsFrames();
+
+  if (timeline.selectedId) selectWsFrame(timeline.selectedId, { keepList: true });
+  else clearWsFrameDetail();
+}
+
+/** Re-render the frame list for the current direction/text filter. */
+function renderWsFrames() {
+  const timeline = state.wsTimeline;
+  if (!timeline) return;
+
+  const terms = String(timeline.filter ?? '')
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  const rows = timeline.frames.filter((frame) => {
+    if (timeline.direction !== 'all' && frame.direction !== timeline.direction) return false;
+    if (terms.length === 0) return true;
+    const haystack = `${frame.seq} ${frame.direction} ${frame.opcode === 2 ? 'binary' : 'text'} ${
+      frame.text ?? ''
+    }`.toLowerCase();
+    return terms.every((term) => haystack.includes(term));
+  });
+
+  dom.wsFramesList.replaceChildren();
+  if (rows.length === 0) {
+    dom.wsFramesList.append(
+      el('li', { class: 'ws-empty' }, timeline.frames.length === 0 ? 'This connection has no frames.' : 'No frames match this filter.'),
+    );
+  }
+  for (const frame of rows) {
+    const preview =
+      frame.opcode === 2
+        ? `<binary ${formatBytes(frame.size)}>`
+        : truncateText(String(frame.text ?? '')) || '<empty>';
+    const item = el(
+      'button',
+      {
+        class: 'ws-frame-item',
+        type: 'button',
+        role: 'option',
+        'aria-selected': frame.id === timeline.selectedId ? 'true' : 'false',
+        'data-testid': `ws-frame-${frame.id}`,
+      },
+      el('span', { class: 'ws-frame-offset' }, `#${frame.seq}`),
+      el(
+        'span',
+        { class: `ws-frame-direction ws-frame-direction-${frame.direction}` },
+        frame.direction === 'send' ? '↑' : '↓',
+      ),
+      el('span', { class: 'ws-frame-preview', title: preview }, preview),
+      el(
+        'span',
+        { class: 'ws-frame-meta' },
+        `${formatDuration(frame.offsetMs) || '+0 ms'}${frame.edited ? ' · edited' : ''}${
+          frame.opcode === 2 ? ' · bin' : ''
+        }`,
+      ),
+    );
+    item.addEventListener('click', () => selectWsFrame(frame.id));
+    dom.wsFramesList.append(el('li', {}, item));
+  }
+
+  dom.wsFramesCount.textContent = `${rows.length} of ${timeline.frames.length} frames`;
+}
+
+/** @param {string} frameId @param {{keepList?: boolean}} [options] */
+function selectWsFrame(frameId, { keepList = false } = {}) {
+  const timeline = state.wsTimeline;
+  if (!timeline) return;
+  const frame = timeline.frames.find((item) => item.id === frameId);
+  if (!frame) return;
+
+  timeline.selectedId = frameId;
+  timeline.confirmDeleteId = null;
+  timeline.confirmRestoreId = null;
+  clearTimeout(state.wsConfirmTimer);
+  if (!keepList) renderWsFrames();
+
+  const direction = frame.direction === 'send' ? 'sent' : 'received';
+  dom.wsFrameDetailMeta.textContent = `#${frame.seq} · ${direction} · +${frame.offsetMs} ms · ${formatBytes(
+    frame.size,
+  )}${frame.edited ? ' · edited' : ''}`;
+  hideFieldError(dom.wsFrameError);
+
+  if (frame.opcode === 2) {
+    dom.wsFrameEditorWrap.hidden = true;
+    dom.wsFrameDetailEmpty.hidden = false;
+    dom.wsFrameDetailEmpty.textContent =
+      'This is a binary frame. Binary frames are replayed byte for byte and cannot be edited in v1.';
+    return;
+  }
+
+  dom.wsFrameDetailEmpty.hidden = true;
+  dom.wsFrameEditorWrap.hidden = false;
+  dom.wsFrameEditor.value = String(frame.text ?? '');
+  dom.wsFrameRestore.hidden = frame.hasOriginal !== true;
+  dom.wsFrameRestore.textContent = 'Restore original';
+  dom.wsFrameDelete.textContent = 'Delete frame';
+  updateWsFrameHint();
+}
+
+function clearWsFrameDetail() {
+  dom.wsFrameDetailEmpty.hidden = false;
+  dom.wsFrameDetailEmpty.textContent = 'Select a text frame to view or edit its payload.';
+  dom.wsFrameEditorWrap.hidden = true;
+  dom.wsFrameDetailMeta.textContent = '';
+  hideFieldError(dom.wsFrameError);
+}
+
+function updateWsFrameHint() {
+  const bytes = new TextEncoder().encode(dom.wsFrameEditor.value).length;
+  const parts = [`${bytes.toLocaleString()} bytes`];
+  let tone = '';
+  const text = dom.wsFrameEditor.value.trim();
+  if (text.startsWith('{') || text.startsWith('[')) {
+    try {
+      JSON.parse(text);
+      parts.push('valid JSON');
+    } catch {
+      parts.push('not valid JSON — it will still be saved as typed');
+      tone = 'warn';
+    }
+  }
+  dom.wsFrameHint.textContent = parts.join(' · ');
+  if (tone) dom.wsFrameHint.dataset.tone = tone;
+  else dom.wsFrameHint.removeAttribute('data-tone');
+}
+
+async function onSaveWsFrame() {
+  const timeline = state.wsTimeline;
+  if (!timeline?.selectedId) return;
+  hideFieldError(dom.wsFrameError);
+  setBusy(dom.wsFrameSave, true);
+  try {
+    const response = await send(MSG.WS_FRAME_UPDATE, {
+      scenarioId: timeline.scenarioId,
+      entryId: timeline.entry.id,
+      frameId: timeline.selectedId,
+      text: dom.wsFrameEditor.value,
+    });
+    applyWsFrameResponse(response);
+    showStatus(`Saved frame #${response?.frame?.seq ?? '?'}.`);
+  } catch (error) {
+    showFieldError(dom.wsFrameError, errorMessage(error, 'Could not save that frame.'));
+  } finally {
+    setBusy(dom.wsFrameSave, false);
+  }
+}
+
+async function onRestoreWsFrame() {
+  const timeline = state.wsTimeline;
+  if (!timeline?.selectedId) return;
+
+  if (timeline.confirmRestoreId !== timeline.selectedId) {
+    timeline.confirmRestoreId = timeline.selectedId;
+    dom.wsFrameRestore.textContent = 'Confirm restore?';
+    clearTimeout(state.wsConfirmTimer);
+    state.wsConfirmTimer = window.setTimeout(() => {
+      if (!state.wsTimeline) return;
+      state.wsTimeline.confirmRestoreId = null;
+      dom.wsFrameRestore.textContent = 'Restore original';
+    }, DELETE_CONFIRM_MS);
+    return;
+  }
+
+  hideFieldError(dom.wsFrameError);
+  setBusy(dom.wsFrameRestore, true);
+  try {
+    const response = await send(MSG.WS_FRAME_UPDATE, {
+      scenarioId: timeline.scenarioId,
+      entryId: timeline.entry.id,
+      frameId: timeline.selectedId,
+      restoreOriginal: true,
+    });
+    applyWsFrameResponse(response);
+    showStatus('Original frame payload restored.');
+  } catch (error) {
+    showFieldError(dom.wsFrameError, errorMessage(error, 'Could not restore that frame.'));
+  } finally {
+    setBusy(dom.wsFrameRestore, false);
+  }
+}
+
+async function onDeleteWsFrame() {
+  const timeline = state.wsTimeline;
+  if (!timeline?.selectedId) return;
+
+  if (timeline.confirmDeleteId !== timeline.selectedId) {
+    timeline.confirmDeleteId = timeline.selectedId;
+    dom.wsFrameDelete.textContent = 'Confirm delete?';
+    clearTimeout(state.wsConfirmTimer);
+    state.wsConfirmTimer = window.setTimeout(() => {
+      if (!state.wsTimeline) return;
+      state.wsTimeline.confirmDeleteId = null;
+      dom.wsFrameDelete.textContent = 'Delete frame';
+    }, DELETE_CONFIRM_MS);
+    return;
+  }
+
+  hideFieldError(dom.wsFrameError);
+  setBusy(dom.wsFrameDelete, true);
+  try {
+    const response = await send(MSG.WS_FRAME_DELETE, {
+      scenarioId: timeline.scenarioId,
+      entryId: timeline.entry.id,
+      frameId: timeline.selectedId,
+    });
+
+    if (response?.removedEntry) {
+      closeWsTimeline();
+      closeEntries();
+      await refreshScenarios();
+      showStatus('That was the last frame, so the WebSocket recording was removed.');
+      return;
+    }
+
+    timeline.frames = Array.isArray(response?.frames) ? response.frames : [];
+    timeline.selectedId = null;
+    if (response?.entry) {
+      timeline.entry = response.entry;
+      applyEntryUpdate(response.entry);
+    }
+    renderWsTimeline();
+    clearWsFrameDetail();
+    showStatus('Frame deleted.');
+  } catch (error) {
+    showFieldError(dom.wsFrameError, errorMessage(error, 'Could not delete that frame.'));
+  } finally {
+    setBusy(dom.wsFrameDelete, false);
+  }
+}
+
+function onPrettyPrintWsFrame() {
+  const timeline = state.wsTimeline;
+  if (!timeline || dom.wsFrameEditor.disabled) return;
+  const adapter = adapterByName(timeline.entry.wsAdapter);
+  try {
+    const pretty = adapter.prettyPrint(dom.wsFrameEditor.value);
+    if (pretty) dom.wsFrameEditor.value = pretty;
+    updateWsFrameHint();
+  } catch {
+    showFieldError(dom.wsFrameError, 'That frame could not be pretty-printed.');
+  }
+}
+
+/** @param {any} response */
+function applyWsFrameResponse(response) {
+  const timeline = state.wsTimeline;
+  if (!timeline) return;
+  if (response?.entry) {
+    timeline.entry = { ...timeline.entry, ...response.entry };
+    applyEntryUpdate(response.entry);
+  }
+  if (response?.frame) {
+    timeline.frames = timeline.frames.map((frame) => (frame.id === response.frame.id ? response.frame : frame));
+    renderWsTimeline();
+    selectWsFrame(response.frame.id, { keepList: true });
+  }
+}
+
+function closeWsTimeline() {
+  if (dom.wsFramesDialog.open) dom.wsFramesDialog.close();
+  state.wsTimeline = null;
+  clearTimeout(state.wsConfirmTimer);
+}
+
 function closeEntries() {
   state.entriesScenarioId = null;
   state.entriesScenario = null;
+
   state.entries = [];
   state.entriesTotal = 0;
   state.entriesFilter = '';

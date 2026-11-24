@@ -162,6 +162,45 @@
               </span>
             </label>
 
+            <label class="check" for="record-ws">
+              <input id="record-ws" type="checkbox" data-testid="record-web-sockets" />
+              <span class="check-copy">
+                <span class="check-title">Record &amp; replay WebSockets</span>
+                <span class="check-hint">
+                  Records <code>ws://</code> and <code>wss://</code> frames and replays them with protocol-aware
+                  support for Socket.IO and ASP.NET Core SignalR. GraphQL sockets follow the GraphQL setting above.
+                </span>
+              </span>
+            </label>
+
+            <div class="field">
+              <label class="field-label" for="ws-replay-timing">WebSocket replay timing</label>
+              <select id="ws-replay-timing" class="input" data-testid="ws-replay-timing">
+                <option value="capped">Recorded timing, capped per frame (default)</option>
+                <option value="original">Exact recorded timing</option>
+                <option value="instant">Instant</option>
+              </select>
+              <p class="field-hint">
+                Server frames are replayed relative to the client frame that triggered them. “Capped” keeps the
+                recorded ordering without long stalls.
+              </p>
+            </div>
+
+            <div class="field">
+              <label class="field-label" for="ws-max-frame-delay">Max frame delay (ms)</label>
+              <input
+                id="ws-max-frame-delay"
+                class="input input-number"
+                type="number"
+                min="0"
+                max="60000"
+                step="50"
+                inputmode="numeric"
+                data-testid="ws-max-frame-delay"
+              />
+              <p class="field-hint">Upper bound used by the capped timing mode (default 1500 ms).</p>
+            </div>
+
             <div class="actions">
               <button id="save-settings" class="btn btn-primary" type="submit" data-testid="save-settings">
                 Save settings
@@ -372,6 +411,85 @@
           </button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="ws-frames-dialog" class="modal modal-wide" data-testid="ws-frames-dialog" aria-labelledby="ws-frames-title">
+      <div class="modal-card">
+        <div class="modal-head">
+          <div class="modal-head-copy">
+            <h2 id="ws-frames-title" class="modal-title">WebSocket timeline</h2>
+            <p id="ws-frames-meta" class="modal-meta" data-testid="ws-frames-meta"></p>
+          </div>
+          <button id="ws-frames-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close WebSocket timeline">
+            Close
+          </button>
+        </div>
+
+        <p id="ws-frames-request" class="modal-request" data-testid="ws-frames-request"></p>
+
+        <div class="ws-toolbar">
+          <label class="sr-only" for="ws-frames-direction">Filter frames by direction</label>
+          <select id="ws-frames-direction" class="input" data-testid="ws-frames-direction">
+            <option value="all">All frames</option>
+            <option value="send">Sent ↑</option>
+            <option value="recv">Received ↓</option>
+          </select>
+          <label class="sr-only" for="ws-frames-filter">Search frames</label>
+          <input
+            id="ws-frames-filter"
+            class="input ws-frames-filter"
+            type="search"
+            placeholder="Search frame contents…"
+            autocomplete="off"
+            spellcheck="false"
+            data-testid="ws-frames-filter"
+          />
+          <span id="ws-frames-count" class="entries-filter-count" data-testid="ws-frames-count" aria-live="polite"></span>
+        </div>
+
+        <div class="ws-layout">
+          <ol id="ws-frames-list" class="ws-frames-list" data-testid="ws-frames-list"></ol>
+          <div class="ws-frame-detail">
+            <p id="ws-frame-detail-empty" class="empty-hint">Select a text frame to view or edit its payload.</p>
+            <div id="ws-frame-editor-wrap" hidden>
+              <p id="ws-frame-detail-meta" class="modal-meta" data-testid="ws-frame-detail-meta"></p>
+              <label class="sr-only" for="ws-frame-editor">Frame payload</label>
+              <textarea
+                id="ws-frame-editor"
+                class="payload-editor"
+                data-testid="ws-frame-editor"
+                rows="14"
+                spellcheck="false"
+                autocomplete="off"
+                aria-describedby="ws-frame-hint"
+              ></textarea>
+              <p id="ws-frame-hint" class="modal-hint" data-testid="ws-frame-hint"></p>
+              <p id="ws-frame-error" class="field-error" role="alert" hidden></p>
+              <div class="modal-actions">
+                <button id="ws-frame-pretty" class="btn btn-ghost btn-sm" type="button" data-testid="ws-frame-pretty">
+                  Pretty-print
+                </button>
+                <button
+                  id="ws-frame-restore"
+                  class="btn btn-secondary btn-sm"
+                  type="button"
+                  data-testid="ws-frame-restore"
+                  hidden
+                >
+                  Restore original
+                </button>
+                <span class="modal-spacer" aria-hidden="true"></span>
+                <button id="ws-frame-delete" class="btn btn-ghost btn-sm" type="button" data-testid="ws-frame-delete">
+                  Delete frame
+                </button>
+                <button id="ws-frame-save" class="btn btn-primary btn-sm" type="button" data-testid="ws-frame-save">
+                  Save frame
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </dialog>
 
     <dialog

@@ -9,7 +9,7 @@
  * though the endpoint is identical.
  */
 import { bytesToUtf8, bytesPreview, looksLikeText, utf8ToBytes } from './bytes.js';
-import { normalizeUrl } from './url.js';
+import { normalizeUrl, wsEndpointKey } from './url.js';
 
 /**
  * SHA-256 of the given bytes as lowercase hex.
@@ -47,6 +47,27 @@ export function requestSignature({ method, url, bodyBytes }, maxBodyChars = 200)
   if (!bodyBytes || bodyBytes.length === 0) return head;
   const preview = looksLikeText(bodyBytes) ? bytesPreview(bodyBytes, maxBodyChars) : `<${bodyBytes.length} bytes>`;
   return `${head} · ${preview}`;
+}
+
+/**
+ * Stable identity of a recorded WebSocket connection.
+ *
+ * WS URLs routinely carry volatile query parameters (`sid`, tokens, cache
+ * busters), so only the origin + path take part in the key.
+ *
+ * @param {string} url
+ * @returns {Promise<string>} hex hash
+ */
+export async function wsConnectionKey(url) {
+  return sha256Hex(utf8ToBytes(`WS\n${wsEndpointKey(url)}`));
+}
+
+/**
+ * Human readable label for a recorded WebSocket connection.
+ * @param {string} url
+ */
+export function wsConnectionSignature(url) {
+  return `WS ${wsEndpointKey(url)}`;
 }
 
 /**

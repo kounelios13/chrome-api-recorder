@@ -138,6 +138,21 @@ function createHooks(tabId) {
       });
       scheduleFlush(tabId);
     },
+    onCapturedWs(session, entry) {
+      session.recorded += 1;
+      scheduleHostUpdate(session.scenarioId, entry.url);
+      pushFeed(tabId, {
+        kind: FEED_KIND.RECORDED,
+        method: 'WS',
+        url: entry.url,
+        status: entry.status,
+        size: entry.size,
+        at: Date.now(),
+        wsAdapter: entry.wsAdapter,
+        frameCount: entry.frameCount,
+      });
+      scheduleFlush(tabId);
+    },
     onHit(session, entry, info = {}) {
       session.hits += 1;
       pushFeed(tabId, {

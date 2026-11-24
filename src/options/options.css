@@ -1235,3 +1235,130 @@ code {
 .combobox-option[aria-selected='true'] {
   box-shadow: inset 2px 0 0 var(--replay);
 }
+
+/* ------------------------------------------------------------------ */
+/* WebSocket frame timeline                                            */
+/* ------------------------------------------------------------------ */
+
+.modal-wide {
+  width: min(1180px, calc(100vw - 40px));
+}
+
+.ws-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ws-toolbar .input {
+  max-width: 190px;
+}
+
+.ws-frames-filter {
+  flex: 1;
+  max-width: 340px;
+}
+
+.ws-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.2fr);
+  gap: 14px;
+  min-height: 260px;
+}
+
+@media (max-width: 860px) {
+  .ws-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.ws-frames-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 52vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.ws-frame-item {
+  display: grid;
+  grid-template-columns: 52px 20px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ws-frame-item:hover {
+  background: var(--bg-hover);
+}
+
+.ws-frame-item[aria-selected='true'] {
+  background: var(--bg-hover);
+  box-shadow: inset 2px 0 0 var(--replay);
+}
+
+.ws-frame-direction {
+  font-weight: 650;
+}
+
+.ws-frame-direction-send {
+  color: var(--record);
+}
+
+.ws-frame-direction-recv {
+  color: var(--replay);
+}
+
+.ws-frame-offset {
+  color: var(--muted);
+}
+
+.ws-frame-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-frame-meta {
+  color: var(--faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.ws-frame-detail {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ws-empty {
+  padding: 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.ws-adapter-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-family: var(--mono);
+  vertical-align: middle;
+}

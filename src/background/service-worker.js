@@ -184,7 +184,12 @@ async function dispatch(message, sender) {
 
       const entries = await db.listEntries(sourceId);
       const bodiesById = {};
+      const framesById = {};
       for (const entry of entries) {
+        if (entry.kind === 'ws') {
+          framesById[entry.id] = await db.listWsFrames(entry.id);
+          continue;
+        }
         bodiesById[entry.id] = (await db.getBody(entry.id)) ?? { id: entry.id, body: '' };
       }
 
@@ -193,6 +198,7 @@ async function dispatch(message, sender) {
       const rewritten = await rewriteScenarioEntries({
         entries,
         bodiesById,
+        framesById,
         newScenarioId: id,
         targetOrigin: target.origin,
         rewriteHeaders,
@@ -246,6 +252,9 @@ async function dispatch(message, sender) {
     case MSG.ENTRY_GET: {
       const { scenarioId, entryId } = requireEntryIds(message);
       const entry = await findRecordedEntry(scenarioId, entryId);
+      if (entry.kind === 'ws') {
+        throw new Error('WebSocket recordings are edited frame by frame. Open the WS frame timeline instead.');
+      }
       const bodyRecord = await db.getBody(entryId);
       if (!bodyRecord) throw new Error('The response body for this request is missing from storage.');
 
@@ -324,6 +333,127 @@ async function dispatch(message, sender) {
       };
     }
 
+    case MSG.WS_FRAMES_GET: {
+      const { scenarioId, entryId } = requireEntryIds(message);
+      const entry = await findRecordedEntry(scenarioId, entryId);
+      if (entry.kind !== 'ws') throw new Error('That recording is not a WebSocket connection.');
+
+      const frames = await db.listWsFrames(entryId);
+      return {
+        ok: true,
+        entry: summarizeEntry(entry),
+        frames: frames.map(summarizeWsFrame),
+        hasEdits: frames.some((frame) => frame.edited === true),
+      };
+    }
+
+    case MSG.WS_FRAME_UPDATE: {
+      const { scenarioId, entryId } = requireEntryIds(message);
+      const frameId = requireString(message.frameId, 'Missing WebSocket frame id.');
+      const entry = await findRecordedEntry(scenarioId, entryId);
+      if (entry.kind !== 'ws') throw new Error('That recording is not a WebSocket connection.');
+
+      const frame = await db.getWsFrame(frameId);
+      if (!frame || frame.entryId !== entryId) {
+        throw new Error('That WebSocket frame was not found. Close the timeline and open it again.');
+      }
+
+      if (message.restoreOriginal) {
+        if (typeof frame.originalPayload !== 'string') {
+          throw new Error('There is no original payload to restore for this frame.');
+        }
+        const size = base64ToBytes(frame.originalPayload).length;
+        /** @type {any} */
+        const restoredFrame = { ...frame, size, edited: false };
+        delete restoredFrame.originalPayload;
+        const restored = await db.restoreWsFramePayload(restoredFrame);
+        if (!restored) throw new Error('The original frame payload could not be restored. Try again.');
+
+        const nextEntry = await persistWsFrameEdit(entry, entryId);
+        await sessions.refreshScenarioData(scenarioId);
+        const updated = await db.getWsFrame(frameId);
+        return {
+          ok: true,
+          frame: updated ? summarizeWsFrame(updated) : null,
+          entry: summarizeEntry(nextEntry),
+        };
+      }
+
+      if (frame.opcode === 2) throw new Error('Binary WebSocket frames cannot be edited as text.');
+      if (typeof message.text !== 'string') throw new Error('The frame payload must be text.');
+
+      const settings = await store.getSettings();
+      const bytes = utf8ToBytes(message.text);
+      if (bytes.length > settings.maxBodyBytes) {
+        throw new Error(
+          `This frame is ${formatBytes(bytes.length)}, above the ${formatBytes(
+            settings.maxBodyBytes,
+          )} limit. Raise “Max response size” in Settings first.`,
+        );
+      }
+
+      const { hasOriginal } = await db.updateWsFramePayload(
+        { ...frame, size: bytes.length, edited: true },
+        bytesToBase64(bytes),
+      );
+      const nextEntry = await persistWsFrameEdit(entry, entryId);
+      await sessions.refreshScenarioData(scenarioId);
+      const updated = await db.getWsFrame(frameId);
+      return {
+        ok: true,
+        frame: updated ? summarizeWsFrame(updated) : null,
+        entry: summarizeEntry(nextEntry),
+        hasOriginal,
+      };
+    }
+
+    case MSG.WS_FRAME_DELETE: {
+      const { scenarioId, entryId } = requireEntryIds(message);
+      const frameId = requireString(message.frameId, 'Missing WebSocket frame id.');
+      const entry = await findRecordedEntry(scenarioId, entryId);
+      if (entry.kind !== 'ws') throw new Error('That recording is not a WebSocket connection.');
+
+      const frame = await db.getWsFrame(frameId);
+      if (!frame || frame.entryId !== entryId) {
+        throw new Error('That WebSocket frame was not found. Close the timeline and open it again.');
+      }
+
+      await db.deleteWsFrame(frameId);
+      const remaining = await db.listWsFrames(entryId);
+
+      if (remaining.length === 0) {
+        await db.deleteEntry(entryId);
+        await sessions.refreshScenarioData(scenarioId);
+
+        const entriesLeft = await db.listEntries(scenarioId);
+        const hosts = collectEntryHosts(entriesLeft);
+        const scenarios = await store.getScenarios();
+        const scenario = scenarios.find((item) => item.id === scenarioId);
+        if (scenario) {
+          scenario.hosts = hosts;
+          await store.setScenarios(scenarios);
+        }
+        return {
+          ok: true,
+          deleted: true,
+          removedEntry: true,
+          frames: [],
+          scenario: { ...(scenario ?? {}), entryCount: entriesLeft.length, hosts },
+        };
+      }
+
+      const nextEntry = recomputeWsEntry(entry, remaining);
+      await db.putEntry(nextEntry);
+      await sessions.refreshScenarioData(scenarioId);
+      return {
+        ok: true,
+        deleted: true,
+        removedEntry: false,
+        entry: summarizeEntry(nextEntry),
+        frames: remaining.map(summarizeWsFrame),
+      };
+    }
+
     case MSG.EXPORT_SCENARIO: {
       const scenarioId = requireString(message.scenarioId, 'Missing scenario id.');
       const scenario = (await store.getScenarios()).find((item) => item.id === scenarioId);
@@ -333,7 +463,12 @@ async function dispatch(message, sender) {
       if (entries.length === 0) throw new Error('This scenario has no recorded requests to export.');
 
       const bodiesById = {};
+      const framesById = {};
       for (const entry of entries) {
+        if (entry.kind === 'ws') {
+          framesById[entry.id] = await db.listWsFrames(entry.id);
+          continue;
+        }
         bodiesById[entry.id] = (await db.getBody(entry.id)) ?? { id: entry.id, body: '' };
       }
 
@@ -341,6 +476,7 @@ async function dispatch(message, sender) {
         scenario,
         entries,
         bodiesById,
+        framesById,
         exportedAt: Date.now(),
         extensionVersion: chrome.runtime.getManifest().version,
       });
@@ -354,6 +490,7 @@ async function dispatch(message, sender) {
       const scenarios = await store.getScenarios();
       const entriesById = {};
       const bodiesById = {};
+      const framesById = {};
       const withEntries = [];
 
       for (const scenario of scenarios) {
@@ -361,6 +498,10 @@ async function dispatch(message, sender) {
         if (entries.length === 0) continue;
         entriesById[scenario.id] = entries;
         for (const entry of entries) {
+          if (entry.kind === 'ws') {
+            framesById[entry.id] = await db.listWsFrames(entry.id);
+            continue;
+          }
           bodiesById[entry.id] = (await db.getBody(entry.id)) ?? { id: entry.id, body: '' };
         }
         withEntries.push(scenario);
@@ -374,6 +515,7 @@ async function dispatch(message, sender) {
         scenarios: withEntries,
         entriesById,
         bodiesById,
+        framesById,
         exportedAt: Date.now(),
         extensionVersion: chrome.runtime.getManifest().version,
       });
@@ -545,6 +687,65 @@ function formatBytes(bytes) {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${bytes} B`;
+}
+
+/**
+ * The subset of one recorded WebSocket frame sent to the options page.
+ * Text frames carry their payload so the timeline editor can show/edit it;
+ * binary frames stay opaque.
+ *
+ * @param {object} frame
+ */
+function summarizeWsFrame(frame) {
+  const payload = typeof frame.payload === 'string' ? frame.payload : '';
+  const bytes = base64ToBytes(payload);
+  const isText = Number(frame.opcode) !== 2;
+  return {
+    id: frame.id,
+    seq: Number(frame.seq) || 0,
+    direction: frame.direction === 'send' ? 'send' : 'recv',
+    opcode: isText ? 1 : 2,
+    offsetMs: Number(frame.offsetMs) || 0,
+    size: Number(frame.size) || bytes.length,
+    edited: frame.edited === true,
+    hasOriginal: typeof frame.originalPayload === 'string',
+    text: isText ? bytesToUtf8(bytes) : null,
+  };
+}
+
+/**
+ * Recompute a WebSocket entry's derived metadata after its frames changed.
+ *
+ * @param {object} entry
+ * @param {object[]} frames
+ */
+function recomputeWsEntry(entry, frames) {
+  const sent = frames.filter((frame) => frame.direction === 'send').length;
+  const size = frames.reduce((sum, frame) => sum + (Number(frame.size) || 0), 0);
+  const edited = frames.some((frame) => frame.edited === true);
+  return {
+    ...entry,
+    frameCount: frames.length,
+    sentCount: sent,
+    recvCount: frames.length - sent,
+    size,
+    edited,
+    editedAt: edited ? Date.now() : null,
+    responsePreview: `${frames.length} frame${frames.length === 1 ? '' : 's'}`,
+  };
+}
+
+/**
+ * Refresh an entry's metadata from its stored frames and persist it.
+ *
+ * @param {object} entry
+ * @param {string} entryIdValue
+ */
+async function persistWsFrameEdit(entry, entryIdValue) {
+  const frames = await db.listWsFrames(entryIdValue);
+  const nextEntry = recomputeWsEntry(entry, frames);
+  await db.putEntry(nextEntry);
+  return nextEntry;
 }
 
 /**

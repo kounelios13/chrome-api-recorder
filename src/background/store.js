@@ -108,10 +108,24 @@ export function sanitizeSettings(input) {
   if (typeof /** @type {any} */ (input).smartFallback === 'boolean') {
     out.smartFallback = /** @type {any} */ (input).smartFallback;
   }
+  if (typeof /** @type {any} */ (input).recordWebSockets === 'boolean') {
+    out.recordWebSockets = /** @type {any} */ (input).recordWebSockets;
+  }
+  if (['capped', 'original', 'instant'].includes(/** @type {any} */ (input).wsReplayTiming)) {
+    out.wsReplayTiming = /** @type {any} */ (input).wsReplayTiming;
+  }
+  const maxFrameDelay = Number(/** @type {any} */ (input).wsMaxFrameDelayMs);
+  if (Number.isFinite(maxFrameDelay)) {
+    out.wsMaxFrameDelayMs = Math.min(Math.max(Math.round(maxFrameDelay), 0), 60000);
+  }
+  const maxFrames = Number(/** @type {any} */ (input).wsMaxFramesPerConnection);
+  if (Number.isFinite(maxFrames)) {
+    out.wsMaxFramesPerConnection = Math.min(Math.max(Math.round(maxFrames), 10), 100000);
+  }
   return out;
 }
 
-/** @returns {Promise<{maxBodyBytes:number, skipGraphql:boolean, replayCookies:boolean}>} */
+/** @returns {Promise<object>} */
 export async function getSettings() {
   return sanitizeSettings(await readLocal(STORAGE.SETTINGS, {}));
 }

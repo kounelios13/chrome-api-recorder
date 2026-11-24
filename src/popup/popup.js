@@ -902,6 +902,10 @@ const REASON_LABELS = {
   'body-unavailable': 'body unavailable',
   'body-missing': 'body missing',
   'fulfill-error': 'replay error',
+  'ws-no-recording': 'WebSocket not recorded',
+  'ws-ambiguous-url': 'ambiguous WebSocket',
+  'ws-frame-unmatched': 'unmatched WebSocket frame',
+  'ws-frames-missing': 'WebSocket frames missing',
 };
 
 /** @param {string} reason */
@@ -987,6 +991,15 @@ function diagnosticsHint(diagnostics, settings) {
   }
   if (reasons.has('fulfill-error')) {
     return 'The recorded response could not be returned. Reload the extension and try again.';
+  }
+  if (reasons.has('ws-ambiguous-url')) {
+    return 'Several recorded WebSockets share this endpoint, so replay was refused. Delete the extra variants in Settings or re-record the scenario.';
+  }
+  if (reasons.has('ws-frame-unmatched')) {
+    return 'The page sent WebSocket frames that have no recorded reply. Reload the page so the socket reconnects, or re-record this scenario.';
+  }
+  if (reasons.has('ws-frames-missing')) {
+    return 'The recorded WebSocket frames are missing from storage. Re-record this scenario.';
   }
   return 'These requests have no recording in this scenario. Record them again, or check the recorded URLs in Settings.';
 }
@@ -1268,7 +1281,11 @@ async function beginSession(kind, button) {
     state.pendingDeleteId = null;
     renderSession();
     renderStart();
-    showNotice(kind === 'replay' ? 'Replay started.' : 'Recording started.');
+    showNotice(
+      kind === 'replay'
+        ? 'Replay started. Reload the page if WebSocket connections were already open.'
+        : 'Recording started.',
+    );
   } catch (error) {
     showError(errorMessage(error, `Could not start ${kind === 'replay' ? 'replay' : 'recording'}.`));
   } finally {

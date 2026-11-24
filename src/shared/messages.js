@@ -23,6 +23,10 @@
  *  scenario.entry.update  {scenarioId, entryId, bodyText} -> {entry, hasOriginal}
  *                         {scenarioId, entryId, restoreOriginal:true} -> {entry, hasOriginal}
  *  scenario.entry.delete   {scenarioId, entryId} -> {deleted, scenario}
+ *  scenario.ws.frames      {scenarioId, entryId} -> {entry, frames, hasEdits}
+ *  scenario.ws.frame.update {scenarioId, entryId, frameId, text}
+ *                          {scenarioId, entryId, frameId, restoreOriginal:true}
+ *  scenario.ws.frame.delete {scenarioId, entryId, frameId} -> {deleted, frames, entry?, removedEntry?}
  *  scenario.export        {scenarioId} -> {fileName, data} (single-scenario JSON document)
  *  scenario.exportAll      {} -> {fileName, data, scenarioCount} (collection JSON document)
  *  scenario.import         {data} -> {scenarios, imported, skipped} (accepts both document kinds)

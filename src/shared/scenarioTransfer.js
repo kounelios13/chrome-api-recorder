@@ -17,9 +17,12 @@ import { base64ToBytes, isBase64 } from './bytes.js';
 
 export const SCENARIO_EXPORT_FORMAT = 'api-recorder-scenario';
 export const SCENARIOS_EXPORT_FORMAT = 'api-recorder-scenarios';
-export const SCENARIO_EXPORT_VERSION = 1;
+export const SCENARIO_EXPORT_VERSION = 2;
+/** Documents written by older versions are still importable. */
+const SUPPORTED_IMPORT_VERSIONS = [1, 2];
 
 const EXPORTED_ENTRY_FIELDS = [
+  'kind',
   'matchKey',
   'method',
   'url',
@@ -35,7 +38,28 @@ const EXPORTED_ENTRY_FIELDS = [
   'requestPreview',
   'responsePreview',
   'responseHeaders',
+  'wsAdapter',
+  'negotiatedProtocol',
+  'frameCount',
+  'sentCount',
+  'recvCount',
+  'durationMs',
+  'truncated',
 ];
+
+const EXPORTED_FRAME_FIELDS = ['seq', 'direction', 'opcode', 'offsetMs', 'size', 'payload', 'originalPayload', 'edited'];
+
+/**
+ * @param {object} frame
+ */
+function buildExportedFrame(frame) {
+  /** @type {any} */
+  const out = {};
+  for (const field of EXPORTED_FRAME_FIELDS) {
+    if (frame?.[field] !== undefined) out[field] = frame[field];
+  }
+  return out;
+}
 
 /**
  * One scenario section inside a document: metadata + entries with bodies.
@@ -47,8 +71,9 @@ const EXPORTED_ENTRY_FIELDS = [
  * }} scenario
  * @param {object[]} entries
  * @param {Record<string, {body:string, originalBody?:string}|undefined>} bodiesById
+ * @param {Record<string, object[]>} [framesById]
  */
-function buildScenarioSection(scenario, entries, bodiesById) {
+function buildScenarioSection(scenario, entries, bodiesById, framesById) {
   return {
     scenario: {
       name: scenario.name,
@@ -57,11 +82,16 @@ function buildScenarioSection(scenario, entries, bodiesById) {
       hosts: scenario.hosts ?? [],
     },
     entries: (Array.isArray(entries) ? entries : []).map((entry) => {
-      const record = bodiesById?.[entry.id] ?? {};
       const out = {};
       for (const field of EXPORTED_ENTRY_FIELDS) {
         if (entry[field] !== undefined) out[field] = entry[field];
       }
+      if (entry.kind === 'ws') {
+        out.kind = 'ws';
+        out.frames = (framesById?.[entry.id] ?? []).map(buildExportedFrame);
+        return out;
+      }
+      const record = bodiesById?.[entry.id] ?? {};
       out.body = typeof record.body === 'string' ? record.body : '';
       if (typeof record.originalBody === 'string') out.originalBody = record.originalBody;
       return out;
@@ -75,17 +105,18 @@ function buildScenarioSection(scenario, entries, bodiesById) {
  *   scenario: {id:string, name:string, createdAt:number, updatedAt:number, hosts?:string[]},
  *   entries: object[],
  *   bodiesById: Record<string, {body:string, originalBody?:string}|undefined>,
+ *   framesById?: Record<string, object[]>,
  *   exportedAt: number,
  *   extensionVersion: string,
  * }} input
  */
-export function buildExportDocument({ scenario, entries, bodiesById, exportedAt, extensionVersion }) {
+export function buildExportDocument({ scenario, entries, bodiesById, framesById, exportedAt, extensionVersion }) {
   return {
     format: SCENARIO_EXPORT_FORMAT,
     formatVersion: SCENARIO_EXPORT_VERSION,
     exportedAt,
     extensionVersion,
-    ...buildScenarioSection(scenario, entries, bodiesById),
+    ...buildScenarioSection(scenario, entries, bodiesById, framesById),
   };
 }
 
@@ -95,18 +126,26 @@ export function buildExportDocument({ scenario, entries, bodiesById, exportedAt,
  *   scenarios: Array<{id:string, name:string, createdAt:number, updatedAt:number, hosts?:string[]}>,
  *   entriesById: Record<string, object[]>,
  *   bodiesById: Record<string, {body:string, originalBody?:string}|undefined>,
+ *   framesById?: Record<string, object[]>,
  *   exportedAt: number,
  *   extensionVersion: string,
  * }} input
  */
-export function buildCollectionExportDocument({ scenarios, entriesById, bodiesById, exportedAt, extensionVersion }) {
+export function buildCollectionExportDocument({
+  scenarios,
+  entriesById,
+  bodiesById,
+  framesById,
+  exportedAt,
+  extensionVersion,
+}) {
   return {
     format: SCENARIOS_EXPORT_FORMAT,
     formatVersion: SCENARIO_EXPORT_VERSION,
     exportedAt,
     extensionVersion,
     scenarios: (Array.isArray(scenarios) ? scenarios : []).map((scenario) =>
-      buildScenarioSection(scenario, entriesById?.[scenario.id] ?? [], bodiesById),
+      buildScenarioSection(scenario, entriesById?.[scenario.id] ?? [], bodiesById, framesById),
     ),
   };
 }
@@ -134,7 +173,7 @@ export function validateScenarioImport(data) {
   }
   const kind = detectExportKind(data);
   if (!kind) return { ok: false, reason: 'This file was not created by API Recorder.', kind: null };
-  if (data.formatVersion !== SCENARIO_EXPORT_VERSION) {
+  if (!SUPPORTED_IMPORT_VERSIONS.includes(Number(data.formatVersion))) {
     return { ok: false, reason: `Unsupported export version: ${String(data.formatVersion)}.`, kind };
   }
 
@@ -181,7 +220,7 @@ function bodySizeOrNull(body, maxBodyBytes) {
  * Normalize one scenario section (name, timestamps, entries, skip reasons).
  * @param {{scenario: any, entries: any[]}} section
  * @param {{now: number, maxBodyBytes: number}} options
- * @returns {{name: string, createdAt: number, updatedAt: number, records: Array<{entry: object, body: string, originalBody?: string}>, skipped: Array<{index: number, reason: string}>}}
+ * @returns {{name: string, createdAt: number, updatedAt: number, records: Array<{entry: object, body: string, originalBody?: string, frames?: object[]}>, skipped: Array<{index: number, reason: string}>}}
  */
 function normalizeScenarioSection(section, { now, maxBodyBytes }) {
   const name = String(section.scenario.name)
@@ -245,7 +284,7 @@ export function normalizeImportedScenario(data, options) {
 /**
  * @param {any} raw
  * @param {{now: number, maxBodyBytes: number}} options
- * @returns {{error: string}|{entry: object, body: string, originalBody?: string}}
+ * @returns {{error: string}|{entry: object, body: string, originalBody?: string, frames?: object[]}}
  */
 function normalizeImportedEntry(raw, { now, maxBodyBytes }) {
   if (!raw || typeof raw !== 'object') return { error: 'entry is not an object' };
@@ -253,6 +292,8 @@ function normalizeImportedEntry(raw, { now, maxBodyBytes }) {
     return { error: 'entry has a missing or invalid match key' };
   }
   if (typeof raw.url !== 'string' || !raw.url.trim()) return { error: 'entry has no URL' };
+
+  if (raw.kind === 'ws') return normalizeImportedWsEntry(raw, { now, maxBodyBytes });
 
   const body = typeof raw.body === 'string' ? raw.body : '';
   const size = bodySizeOrNull(body, maxBodyBytes);
@@ -269,6 +310,7 @@ function normalizeImportedEntry(raw, { now, maxBodyBytes }) {
 
   return {
     entry: {
+      kind: 'http',
       matchKey: raw.matchKey,
       method,
       url: String(raw.url),
@@ -296,6 +338,87 @@ function normalizeImportedEntry(raw, { now, maxBodyBytes }) {
     originalBody,
   };
 }
+
+/**
+ * Normalize a WebSocket entry and its frames. Frames are validated like bodies:
+ * base64 payloads within the configured size limit.
+ *
+ * @param {any} raw
+ * @param {{now: number, maxBodyBytes: number}} options
+ */
+function normalizeImportedWsEntry(raw, { now, maxBodyBytes }) {
+  if (!Array.isArray(raw.frames) || raw.frames.length === 0) {
+    return { error: 'WebSocket entry has no frames' };
+  }
+
+  /** @type {object[]} */
+  const frames = [];
+  for (const [index, frame] of raw.frames.entries()) {
+    if (!frame || typeof frame !== 'object') return { error: 'WebSocket frame is not an object' };
+    if (typeof frame.payload !== 'string' || !isBase64(frame.payload)) {
+      return { error: `WebSocket frame ${index} has an invalid payload` };
+    }
+    const size = bodySizeOrNull(frame.payload, maxBodyBytes);
+    if (size === null) return { error: `WebSocket frame ${index} has an invalid payload` };
+    if (size === -1) return { error: `WebSocket frame ${index} is larger than the configured limit` };
+
+    const seq = Number(frame.seq);
+    const direction = frame.direction === 'send' ? 'send' : 'recv';
+    const opcode = Number(frame.opcode) === 2 ? 2 : 1;
+    const originalPayload =
+      typeof frame.originalPayload === 'string' && isBase64(frame.originalPayload)
+        ? frame.originalPayload
+        : undefined;
+
+    /** @type {any} */
+    const normalized = {
+      seq: Number.isFinite(seq) ? Math.trunc(seq) : index,
+      direction,
+      opcode,
+      offsetMs: Math.max(0, Number(frame.offsetMs) || 0),
+      size,
+      payload: frame.payload,
+      edited: frame.edited === true,
+    };
+    if (originalPayload) normalized.originalPayload = originalPayload;
+    frames.push(normalized);
+  }
+
+  frames.sort((left, right) => left.seq - right.seq);
+  const sent = frames.filter((frame) => frame.direction === 'send').length;
+  const status = Number(raw.status);
+
+  return {
+    entry: {
+      kind: 'ws',
+      matchKey: raw.matchKey,
+      method: 'WS',
+      url: String(raw.url),
+      status: Number.isFinite(status) && status > 0 ? Math.trunc(status) : 101,
+      statusText: typeof raw.statusText === 'string' ? raw.statusText : '',
+      mimeType: 'websocket',
+      resourceType: 'WebSocket',
+      wsAdapter: typeof raw.wsAdapter === 'string' ? raw.wsAdapter : 'generic',
+      negotiatedProtocol: typeof raw.negotiatedProtocol === 'string' ? raw.negotiatedProtocol : '',
+      frameCount: frames.length,
+      sentCount: sent,
+      recvCount: frames.length - sent,
+      durationMs: Math.max(0, Number(raw.durationMs) || 0),
+      truncated: raw.truncated === true,
+      size: frames.reduce((sum, frame) => sum + frame.size, 0),
+      capturedAt: Number(raw.capturedAt) || now,
+      bodyKind: 'text',
+      edited: raw.edited === true,
+      editedAt: raw.edited === true ? Number(raw.editedAt) || now : null,
+      requestPreview: typeof raw.requestPreview === 'string' ? raw.requestPreview : '',
+      responsePreview: typeof raw.responsePreview === 'string' ? raw.responsePreview : '',
+      responseHeaders: [],
+    },
+    body: '',
+    frames,
+  };
+}
+
 
 /**
  * A scenario name that does not collide with existing local scenario names.

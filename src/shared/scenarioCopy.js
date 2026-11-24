@@ -13,7 +13,7 @@
  *    `smartFallback` (byUrl / byPath) when replayed on the target host.
  */
 import { LIMITS } from './constants.js';
-import { requestKey } from './matchkey.js';
+import { requestKey, wsConnectionKey } from './matchkey.js';
 import { collectEntryHosts } from './scenarioHosts.js';
 import { normalizeUrl, originOf } from './url.js';
 
@@ -226,9 +226,13 @@ export function rewriteResponseHeaders(headers, sourceOrigins, targetOrigin) {
 /**
  * Rewrite all entries and bodies of a scenario to a single target origin.
  *
+ * WebSocket entries are re-keyed with `wsConnectionKey` and their frames are
+ * carried over, so a copied scenario can replay sockets against the new host.
+ *
  * @param {{
  *   entries: Array<any>,
  *   bodiesById?: Record<string, {id?: string, body?: string, originalBody?: string}>,
+ *   framesById?: Record<string, object[]>,
  *   newScenarioId: string,
  *   targetOrigin: string,
  *   rewriteHeaders?: boolean,
@@ -237,12 +241,15 @@ export function rewriteResponseHeaders(headers, sourceOrigins, targetOrigin) {
 export async function rewriteScenarioEntries({
   entries,
   bodiesById = {},
+  framesById = {},
   newScenarioId,
   targetOrigin,
   rewriteHeaders = true,
 }) {
   const { origin: normalizedOrigin, host: targetHost } = normalizeTargetOrigin(targetOrigin);
   const list = Array.isArray(entries) ? entries : [];
+  const targetUrl = new URL(normalizedOrigin);
+  const wsOrigin = `${targetUrl.protocol === 'https:' ? 'wss:' : 'ws:'}//${targetUrl.host}`;
 
   const sourceOrigins = new Set();
   for (const entry of list) {
@@ -256,16 +263,22 @@ export async function rewriteScenarioEntries({
 
   for (const entry of list) {
     const oldUrl = String(entry.url ?? '');
-    const newUrl = rewriteUrlOrigin(oldUrl, normalizedOrigin);
+    const isWs = entry.kind === 'ws' || String(entry.method).toUpperCase() === 'WS';
+    const newUrl = rewriteUrlOrigin(oldUrl, isWs ? wsOrigin : normalizedOrigin);
 
-    const emptyKey = await requestKey({ method: entry.method, url: oldUrl });
     let newMatchKey;
-    if (emptyKey === entry.matchKey) {
-      newMatchKey = await requestKey({ method: entry.method, url: newUrl });
+    if (isWs) {
+      newMatchKey = await wsConnectionKey(newUrl);
       rekeyedCount += 1;
     } else {
-      newMatchKey = entry.matchKey;
-      fallbackCount += 1;
+      const emptyKey = await requestKey({ method: entry.method, url: oldUrl });
+      if (emptyKey === entry.matchKey) {
+        newMatchKey = await requestKey({ method: entry.method, url: newUrl });
+        rekeyedCount += 1;
+      } else {
+        newMatchKey = entry.matchKey;
+        fallbackCount += 1;
+      }
     }
 
     const newId = `${newScenarioId}:${newMatchKey}`;
@@ -291,6 +304,7 @@ export async function rewriteScenarioEntries({
     if (typeof bodyRecord?.originalBody === 'string') {
       record.originalBody = bodyRecord.originalBody;
     }
+    if (isWs) record.frames = Array.isArray(framesById?.[entry.id]) ? framesById[entry.id] : [];
     records.push(record);
   }
 

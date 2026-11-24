@@ -21,6 +21,9 @@ export const MSG = Object.freeze({
   ENTRY_GET: 'scenario.entry.get',
   ENTRY_UPDATE: 'scenario.entry.update',
   ENTRY_DELETE: 'scenario.entry.delete',
+  WS_FRAMES_GET: 'scenario.ws.frames',
+  WS_FRAME_UPDATE: 'scenario.ws.frame.update',
+  WS_FRAME_DELETE: 'scenario.ws.frame.delete',
   EXPORT_SCENARIO: 'scenario.export',
   EXPORT_ALL_SCENARIOS: 'scenario.exportAll',
   IMPORT_SCENARIO: 'scenario.import',
@@ -58,9 +61,33 @@ export const STORAGE = Object.freeze({
 /** IndexedDB layout. */
 export const DB = Object.freeze({
   NAME: 'api-recorder-db',
-  VERSION: 1,
+  VERSION: 2,
   ENTRIES: 'entries',
   BODIES: 'bodies',
+  WS_FRAMES: 'ws_frames',
+});
+
+/** Kinds of recorded entry, stored on every `entries` record (`http` when absent). */
+export const ENTRY_KIND = Object.freeze({
+  HTTP: 'http',
+  WS: 'ws',
+});
+
+/** Protocol adapter names used by WebSocket recording and replay. */
+export const WS_ADAPTER = Object.freeze({
+  SOCKET_IO: 'socketio',
+  SIGNALR: 'signalr',
+  GENERIC: 'generic',
+});
+
+/** How recorded WebSocket server frames are timed during replay. */
+export const WS_TIMING = Object.freeze({
+  /** Keep the recorded offsets, but cap every delay at `wsMaxFrameDelayMs`. */
+  CAPPED: 'capped',
+  /** Replay with the exact recorded delays (can be slow). */
+  ORIGINAL: 'original',
+  /** Deliver recorded server frames immediately. */
+  INSTANT: 'instant',
 });
 
 export const DEFAULT_SETTINGS = Object.freeze({
@@ -75,6 +102,14 @@ export const DEFAULT_SETTINGS = Object.freeze({
    * recording for the same URL (or same path) if that fallback is unambiguous.
    */
   smartFallback: true,
+  /** Record and replay WebSocket connections. */
+  recordWebSockets: true,
+  /** How recorded server frames are spaced during WebSocket replay. */
+  wsReplayTiming: WS_TIMING.CAPPED,
+  /** Delay cap (ms) for `capped` replay timing. */
+  wsMaxFrameDelayMs: 1500,
+  /** Hard limit on recorded frames per WebSocket connection. */
+  wsMaxFramesPerConnection: 2000,
 });
 
 export const LIMITS = Object.freeze({
@@ -84,6 +119,10 @@ export const LIMITS = Object.freeze({
   MAX_UI_ENTRIES: 200,
   /** Requests above this many bytes of request body are not keyed reliably, so skipped. */
   MAX_REQUEST_BODY_BYTES: 2 * 1024 * 1024,
+  /** Recorded WebSocket frames above this size are dropped (connection marked truncated). */
+  MAX_WS_FRAME_BYTES: 1024 * 1024,
+  /** Recorded WebSocket payload bytes across one connection. */
+  MAX_WS_CONNECTION_BYTES: 20 * 1024 * 1024,
 });
 
 export const SESSION_MODE = Object.freeze({
