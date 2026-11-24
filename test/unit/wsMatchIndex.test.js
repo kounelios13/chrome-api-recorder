@@ -134,7 +134,10 @@ test('SignalR negotiate is only treated as a WS handshake when the hub was recor
     'n'.repeat(64),
     10,
   );
-  const hub = wsEntry('hub', 'wss://api.test/hub?access_token=abc', 'h'.repeat(64), 20);
+  const hub = {
+    ...wsEntry('hub', 'wss://api.test/hub?access_token=abc', 'h'.repeat(64), 20),
+    wsAdapter: 'signalr',
+  };
 
   const withHub = buildMatchIndexes([negotiate, hub]);
   const hit = lookupHandshakeRecording(
@@ -158,4 +161,35 @@ test('wsEndpointForNegotiate maps the negotiate path to the hub endpoint', () =>
   assert.equal(wsEndpointForNegotiate('https://api.test/hub/negotiate'), 'WS wss://api.test/hub');
   assert.equal(wsEndpointForNegotiate('http://localhost:3000/chat/negotiate?x=1'), 'WS ws://localhost:3000/chat');
   assert.equal(wsEndpointForNegotiate('https://api.test/api/items'), null);
+});
+
+test('a new Socket.IO session resets the previous polling cursors', () => {
+  const cursor = new Map();
+  const pollKey = 'GET https://api.test/socket.io/?EIO=4&transport=polling#poll';
+  const postKey = 'POST https://api.test/socket.io/?EIO=4&transport=polling#post';
+  const openKey = 'GET https://api.test/socket.io/?EIO=4&transport=polling#open';
+  cursor.set(pollKey, 3);
+  cursor.set(postKey, 2);
+
+  advanceHandshakeCursor(cursor, openKey);
+  assert.equal(cursor.get(pollKey), undefined);
+  assert.equal(cursor.get(postKey), undefined);
+  assert.equal(cursor.get(openKey), 1);
+});
+
+test('negotiate gating accepts a trailing slash and rejects non-SignalR hubs', () => {
+  const negotiate = httpEntry('neg', 'POST', 'https://api.test/hub/negotiate/', 'n'.repeat(64));
+  const genericHub = { ...wsEntry('hub', 'wss://api.test/hub', 'h'.repeat(64)), wsAdapter: 'generic' };
+  const signalrHub = { ...genericHub, wsAdapter: 'signalr' };
+
+  assert.equal(
+    lookupHandshakeRecording(buildMatchIndexes([negotiate, genericHub]), { method: 'POST', url: 'https://api.test/hub/negotiate/' }, new Map()),
+    null,
+  );
+  const hit = lookupHandshakeRecording(
+    buildMatchIndexes([negotiate, signalrHub]),
+    { method: 'POST', url: 'https://api.test/hub/negotiate/' },
+    new Map(),
+  );
+  assert.equal(hit?.entry.id, 'neg');
 });

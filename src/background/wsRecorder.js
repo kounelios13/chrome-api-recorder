@@ -158,6 +158,7 @@ function onCreate(state, params) {
     firstRecvFrame: null,
     frames: [],
     stagedCount: 0,
+    pendingFlushes: new Set(),
     bytes: 0,
     truncated: false,
     protocol: '',
@@ -172,6 +173,17 @@ function onHandshakeRequest(state, params) {
   if (!connection) return;
   const wallTime = Number(params?.wallTime);
   if (Number.isFinite(wallTime) && wallTime > 0) connection.openedAt = Math.round(wallTime * 1000);
+
+  // `Network.webSocketCreated` does not report sub-protocols, but the handshake
+  // request does. They decide GraphQL exclusion and adapter detection.
+  const headers = params?.request?.headers ?? {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (String(name).toLowerCase() !== 'sec-websocket-protocol') continue;
+    connection.requestProtocols = String(value ?? '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
 }
 
 /** @param {TabState} state @param {any} params */
@@ -232,10 +244,18 @@ function onFrame(state, params, direction) {
     if (direction === 'recv' && connection.firstRecvFrame == null) connection.firstRecvFrame = frame.text;
   }
 
-  const timestampMs = Number(params?.timestamp);
-  const offsetMs = Number.isFinite(timestampMs) && timestampMs > 0
-    ? Math.max(0, Math.round(timestampMs * 1000 - connection.openedAt))
-    : Math.max(0, Date.now() - connection.openedAt);
+  // CDP frame timestamps are monotonic seconds, while the handshake wallTime is
+  // epoch seconds: subtracting them collapses every offset to 0. Anchor on the
+  // first frame instead, which is all replay needs (relative spacing).
+  const timestamp = Number(params?.timestamp);
+  let offsetMs;
+  if (Number.isFinite(timestamp) && timestamp > 0) {
+    if (connection.firstFrameTimestamp == null) connection.firstFrameTimestamp = timestamp;
+    offsetMs = Math.max(0, Math.round((timestamp - connection.firstFrameTimestamp) * 1000));
+  } else {
+    if (connection.firstFrameWallMs == null) connection.firstFrameWallMs = Date.now();
+    offsetMs = Math.max(0, Date.now() - connection.firstFrameWallMs);
+  }
 
   connection.frames.push({
     seq: connection.frames.length,
@@ -269,14 +289,13 @@ function flush(state, connection) {
   if (connection.frames.length <= connection.stagedCount) return;
   const frames = connection.frames.slice(connection.stagedCount);
   connection.stagedCount = connection.frames.length;
-  connection.pendingFlush = db
+  const task = db
     .appendWsFrames(connection.stagingEntryId, state.scenarioId, frames)
     .catch(() => {
       /* staging is best-effort */
-    })
-    .finally(() => {
-      connection.pendingFlush = null;
     });
+  connection.pendingFlushes.add(task);
+  void task.finally(() => connection.pendingFlushes.delete(task));
 }
 
 /** @param {TabState} state @param {object} connection @param {string} message */
@@ -319,7 +338,9 @@ function onClosed(state, params) {
  */
 async function finalize(state, connection, { reason = 'stopped' } = {}) {
   connection.finalized = true;
-  if (connection.pendingFlush) await connection.pendingFlush.catch(() => {});
+  if (connection.pendingFlushes?.size > 0) {
+    await Promise.allSettled([...connection.pendingFlushes]);
+  }
 
   const frames = connection.frames;
   if (frames.length === 0) {
@@ -327,9 +348,17 @@ async function finalize(state, connection, { reason = 'stopped' } = {}) {
     return false;
   }
 
+  const protocols =
+    connection.requestProtocols?.length > 0 ? connection.requestProtocols : connection.protocols;
+
+  if (state.settings?.skipGraphql !== false && isGraphqlWs({ url: connection.url, protocols })) {
+    await dropStaging(connection);
+    return false;
+  }
+
   const adapter = detectAdapter({
     url: connection.url,
-    protocols: connection.protocols,
+    protocols,
     firstSentFrame: connection.firstSentFrame,
     firstRecvFrame: connection.firstRecvFrame,
   });
@@ -351,7 +380,7 @@ async function finalize(state, connection, { reason = 'stopped' } = {}) {
     mimeType: 'websocket',
     resourceType: 'WebSocket',
     wsAdapter: adapter.name,
-    negotiatedProtocol: connection.protocol || connection.protocols[0] || '',
+    negotiatedProtocol: connection.protocol || protocols[0] || '',
     frameCount: frames.length,
     sentCount: frames.filter((frame) => frame.direction === 'send').length,
     recvCount: frames.filter((frame) => frame.direction === 'recv').length,

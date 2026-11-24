@@ -172,9 +172,13 @@ CDP can record WebSockets natively but cannot intercept them, so replay uses a t
 - **Go live** closes mocked sockets with code `1001` (Going Away), so Socket.IO / SignalR reconnect
   on their own and the reconnecting socket passes through to the real server.
 - **Per-frame routing**: sockets are keyed by execution context plus connection id, so a widget in a
-  same-origin iframe replays independently instead of colliding with the top frame. A frame that has
-  no recorded reply is reported to the page as an `error` event (and to the popup diagnostics) rather
-  than vanishing silently.
+  same-origin iframe replays independently instead of colliding with the top frame. Every page
+  command targets the frame that owns the socket, and a frame on another origin is refused scenario
+  data even inside the same target. A frame that has no recorded reply is reported to the page as an
+  `error` event (and to the popup diagnostics) rather than vanishing silently.
+- **Replay state is per session**: each start uses a fresh, unguessable binding name, and the shim
+  replaces a stale install, so stopping and restarting replay, switching scenarios or recovering
+  after a service-worker restart works without reloading the page.
 - **Offline HTTP handshake**: Socket.IO polling (`GET/POST /socket.io/?EIO=…&transport=polling`) and
   SignalR `/negotiate` requests are matched by a canonical bucket that ignores the `t` cache-buster
   and replays the recorded polling sequence in order, so a scenario can replay with no backend
@@ -184,7 +188,9 @@ CDP can record WebSockets natively but cannot intercept them, so replay uses a t
 
 WebSocket frame recording is bounded: frames above 1 MB, connections above 20 MB or 2000 frames are
 marked truncated instead of exhausting storage. GraphQL sockets (`graphql-ws`,
-`graphql-transport-ws`, or a URL containing `graphql`) follow the existing GraphQL exclusion toggle.
+`graphql-transport-ws`, or a URL containing `graphql`) follow the existing GraphQL exclusion toggle;
+the sub-protocol is read from the handshake request, because `Network.webSocketCreated` does not
+report it.
 
 ### Matching rules
 

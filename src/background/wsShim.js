@@ -41,7 +41,10 @@ function wsShimMain(bridgeName, symbolKey) {
   const previous = scope[installKey];
   if (previous) {
     try {
-      previous.closeAll(1001, 'Replay restarted');
+      // reset() closes the old mocked sockets and puts the native constructor
+      // back; closing without restoring would leave the wrapper installed with
+      // no usable bridge.
+      previous.reset();
     } catch {
       /* old shim may already be broken */
     }
@@ -382,6 +385,8 @@ function wsShimMain(bridgeName, symbolKey) {
   MockWebSocket.prototype.CLOSED = CLOSED;
 
   const api = {
+    /** Name of the bridge this shim captured; lets the worker detect a stale shim. */
+    bindingName: bridgeName,
     openResult(connId, options) {
       const socket = sockets.get(String(connId));
       if (!socket) return;
@@ -435,9 +440,21 @@ function wsShimMain(bridgeName, symbolKey) {
  * The injectable script. `function.toString()` keeps the shim and its helpers in
  * one self-contained expression.
  */
-export const WS_SHIM_SOURCE = `(${wsShimMain.toString()})(${JSON.stringify(WS_BRIDGE_NAME)}, ${JSON.stringify(
-  WS_SHIM_SYMBOL,
-)});`;
+export const WS_SHIM_SOURCE = wsShimSource(WS_BRIDGE_NAME);
+
+/**
+ * Build the injectable script for a specific binding name.
+ *
+ * Replay uses a fresh, unguessable name per session: a binding that the shim
+ * already deleted cannot be recreated by calling `Runtime.addBinding` again
+ * with the same name, so a unique name is what makes a second session work
+ * without a page reload.
+ *
+ * @param {string} bindingName
+ */
+export function wsShimSource(bindingName) {
+  return `(${wsShimMain.toString()})(${JSON.stringify(String(bindingName))}, ${JSON.stringify(WS_SHIM_SYMBOL)});`;
+}
 
 /**
  * Expression that runs one command against the installed shim.

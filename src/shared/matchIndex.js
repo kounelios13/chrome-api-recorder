@@ -201,11 +201,13 @@ export function lookupHandshakeRecording(indexes, request, cursor) {
   if (!key) return null;
 
   // A `/negotiate` call is only a WebSocket handshake when this scenario also
-  // recorded the hub socket it negotiates for; otherwise it is ordinary HTTP
-  // and must go through normal matching.
-  if (/\/negotiate$/i.test(key)) {
+  // recorded the SignalR hub socket it negotiates for; otherwise it is ordinary
+  // HTTP and must go through normal matching. A non-SignalR `/negotiate`
+  // endpoint that happens to share a path with a socket must not be hijacked.
+  if (/\/negotiate\/?$/i.test(key)) {
     const endpoint = wsEndpointForNegotiate(request?.url);
-    if (!endpoint || !indexes.byPath?.has(endpoint)) return null;
+    const candidates = endpoint ? indexes.byPath?.get(endpoint) ?? [] : [];
+    if (!candidates.some((entry) => entry?.wsAdapter === 'signalr')) return null;
   }
 
   const bucket = indexes.byHandshake.get(key) ?? [];
@@ -223,6 +225,20 @@ export function lookupHandshakeRecording(indexes, request, cursor) {
  */
 export function advanceHandshakeCursor(cursor, key) {
   if (!key) return;
+
+  // A new Socket.IO session starts with the `open` request; the polling and
+  // POST cursors of the previous session must not leak into it (otherwise a
+  // reconnecting client is served the last recorded responses).
+  if (key.endsWith('#open')) {
+    const base = key.slice(0, key.lastIndexOf('#'));
+    cursor.delete(`${base}#poll`);
+    const [verb, ...rest] = base.split(' ');
+    if (verb === 'GET' || verb === 'POST') {
+      const otherVerb = verb === 'GET' ? 'POST' : 'GET';
+      cursor.delete(`${otherVerb} ${rest.join(' ')}#post`);
+    }
+  }
+
   cursor.set(key, (Number(cursor.get(key)) || 0) + 1);
 }
 

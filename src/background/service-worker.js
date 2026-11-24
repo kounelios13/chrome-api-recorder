@@ -533,6 +533,7 @@ async function dispatch(message, sender) {
       const sections = normalizeImportedScenarios(message.data, {
         now: Date.now(),
         maxBodyBytes: settings.maxBodyBytes,
+        maxFrameBytes: Number(settings.wsMaxFrameBytes) || DEFAULT_SETTINGS.wsMaxFrameBytes,
       });
 
       const scenarios = await store.getScenarios();

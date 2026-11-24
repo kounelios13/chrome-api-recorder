@@ -260,16 +260,24 @@ async function handlePaused(tabId, state, params) {
     return continueLive();
   }
 
+  const matchKey = await requestKey({ method, url, bodyBytes: body.bytes });
+
+  // An exact method + URL + body match always wins, even for a handshake URL:
+  // the bucket cursor is only a fallback for the volatile polling sequence.
+  const exactEntry = state.indexes.exact.get(matchKey);
+  if (exactEntry) return fulfillRequest(tabId, state, requestId, request, exactEntry, 'exact');
+
   // Socket.IO / SignalR transport handshakes are matched by canonical bucket and
   // replayed in recorded order, so an offline client can finish its polling
-  // handshake and upgrade to WebSocket.
-  const handshake = lookupHandshakeRecording(state.indexes, { method, url }, state.handshakeCursor);
-  if (handshake) {
-    advanceHandshakeCursor(state.handshakeCursor, handshake.key);
-    return fulfillRequest(tabId, state, requestId, request, handshake.entry, 'handshake');
+  // handshake and upgrade to WebSocket. Only when WebSocket replay is enabled.
+  if (state.settings.recordWebSockets !== false) {
+    const handshake = lookupHandshakeRecording(state.indexes, { method, url }, state.handshakeCursor);
+    if (handshake) {
+      advanceHandshakeCursor(state.handshakeCursor, handshake.key);
+      return fulfillRequest(tabId, state, requestId, request, handshake.entry, 'handshake');
+    }
   }
 
-  const matchKey = await requestKey({ method, url, bodyBytes: body.bytes });
   const lookup = lookupRecording(state.indexes, { method, url, matchKey }, { smartFallback });
 
   if (!lookup.entry) {

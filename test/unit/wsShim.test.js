@@ -7,6 +7,7 @@ import {
   WS_SHIM_SOURCE,
   WS_SHIM_SYMBOL,
   wsShimCommand,
+  wsShimSource,
 } from '../../src/background/wsShim.js';
 
 class FakeMessageEvent extends Event {
@@ -246,4 +247,23 @@ test('the in-page error command surfaces unmatched frames without closing', () =
 
   assert.deepEqual(errors, ['no recorded reply']);
   assert.equal(socket.readyState, 1);
+});
+
+
+test('a stale shim is replaced when the session uses a fresh binding name', () => {
+  const { sandbox, calls } = loadShim();
+  const first = new sandbox.WebSocket('wss://api.test/one');
+  assert.equal(calls.filter((call) => call.cmd === 'open').length, 1);
+
+  // A later session registers a new binding and injects its own source; the
+  // old shim must hand over instead of swallowing the install.
+  const freshCalls = [];
+  sandbox.__freshBridge = (payload) => freshCalls.push(JSON.parse(payload));
+  vm.runInContext(wsShimSource('__freshBridge'), sandbox, { filename: 'wsShim.js' });
+
+  const second = new sandbox.WebSocket('wss://api.test/two');
+  assert.equal(freshCalls.filter((call) => call.cmd === 'open').length, 1);
+  assert.equal(calls.filter((call) => call.cmd === 'open').length, 1, 'old bridge must stay silent');
+  assert.equal(second.readyState, 0);
+  assert.ok(first.readyState >= 2, 'the replaced session closes its mocked sockets');
 });

@@ -225,7 +225,7 @@ function bodySizeOrNull(body, maxBodyBytes) {
  * @param {{now: number, maxBodyBytes: number}} options
  * @returns {{name: string, createdAt: number, updatedAt: number, records: Array<{entry: object, body: string, originalBody?: string, frames?: object[]}>, skipped: Array<{index: number, reason: string}>}}
  */
-function normalizeScenarioSection(section, { now, maxBodyBytes }) {
+function normalizeScenarioSection(section, { now, maxBodyBytes, maxFrameBytes }) {
   const name = String(section.scenario.name)
     .replace(/\s+/g, ' ')
     .trim()
@@ -243,7 +243,7 @@ function normalizeScenarioSection(section, { now, maxBodyBytes }) {
       skipped.push({ index, reason: 'the export is larger than the import limit' });
       return;
     }
-    const normalized = normalizeImportedEntry(raw, { now, maxBodyBytes });
+    const normalized = normalizeImportedEntry(raw, { now, maxBodyBytes, maxFrameBytes });
     if (normalized.error) {
       skipped.push({ index, reason: normalized.error });
       return;
@@ -253,8 +253,13 @@ function normalizeScenarioSection(section, { now, maxBodyBytes }) {
     // limit is unbounded memory in the options page.
     const entryBytes =
       normalized.entry.kind === 'ws'
-        ? (normalized.frames ?? []).reduce((sum, frame) => sum + (Number(frame.size) || 0), 0)
-        : Number(normalized.entry.size) || 0;
+        ? (normalized.frames ?? []).reduce(
+            (sum, frame) =>
+              sum + (Number(frame.size) || 0) + (frame.originalPayload ? frame.originalPayload.length : 0),
+            0,
+          )
+        : (Number(normalized.entry.size) || 0) +
+          (normalized.originalBody ? normalized.originalBody.length : 0);
     if (totalBytes + entryBytes > MAX_IMPORT_BYTES) {
       exhausted = true;
       skipped.push({ index, reason: 'the export is larger than the import limit' });
@@ -275,7 +280,10 @@ function normalizeScenarioSection(section, { now, maxBodyBytes }) {
  * @param {{now?: number, maxBodyBytes?: number}} [options]
  * @returns {Array<{name: string, createdAt: number, updatedAt: number, records: Array<{entry: object, body: string, originalBody?: string}>, skipped: Array<{index: number, reason: string}>}>}
  */
-export function normalizeImportedScenarios(data, { now = Date.now(), maxBodyBytes = Infinity } = {}) {
+export function normalizeImportedScenarios(
+  data,
+  { now = Date.now(), maxBodyBytes = Infinity, maxFrameBytes = maxBodyBytes } = {},
+) {
   const validation = validateScenarioImport(data);
   if (!validation.ok) throw new Error(validation.reason);
 
@@ -283,7 +291,9 @@ export function normalizeImportedScenarios(data, { now = Date.now(), maxBodyByte
     validation.kind === 'single'
       ? [{ scenario: data.scenario, entries: data.entries }]
       : data.scenarios;
-  return sections.map((section) => normalizeScenarioSection(section, { now, maxBodyBytes }));
+  return sections.map((section) =>
+    normalizeScenarioSection(section, { now, maxBodyBytes, maxFrameBytes }),
+  );
 }
 
 /**
@@ -309,14 +319,14 @@ export function normalizeImportedScenario(data, options) {
  * @param {{now: number, maxBodyBytes: number}} options
  * @returns {{error: string}|{entry: object, body: string, originalBody?: string, frames?: object[]}}
  */
-function normalizeImportedEntry(raw, { now, maxBodyBytes }) {
+function normalizeImportedEntry(raw, { now, maxBodyBytes, maxFrameBytes = maxBodyBytes }) {
   if (!raw || typeof raw !== 'object') return { error: 'entry is not an object' };
   if (typeof raw.matchKey !== 'string' || !/^[0-9a-f]{64}$/.test(raw.matchKey)) {
     return { error: 'entry has a missing or invalid match key' };
   }
   if (typeof raw.url !== 'string' || !raw.url.trim()) return { error: 'entry has no URL' };
 
-  if (raw.kind === 'ws') return normalizeImportedWsEntry(raw, { now, maxBodyBytes });
+  if (raw.kind === 'ws') return normalizeImportedWsEntry(raw, { now, maxBodyBytes, maxFrameBytes });
 
   const body = typeof raw.body === 'string' ? raw.body : '';
   const size = bodySizeOrNull(body, maxBodyBytes);
@@ -369,7 +379,7 @@ function normalizeImportedEntry(raw, { now, maxBodyBytes }) {
  * @param {any} raw
  * @param {{now: number, maxBodyBytes: number}} options
  */
-function normalizeImportedWsEntry(raw, { now, maxBodyBytes }) {
+function normalizeImportedWsEntry(raw, { now, maxBodyBytes, maxFrameBytes = maxBodyBytes }) {
   if (!Array.isArray(raw.frames) || raw.frames.length === 0) {
     return { error: 'WebSocket entry has no frames' };
   }
@@ -381,7 +391,7 @@ function normalizeImportedWsEntry(raw, { now, maxBodyBytes }) {
     if (typeof frame.payload !== 'string' || !isBase64(frame.payload)) {
       return { error: `WebSocket frame ${index} has an invalid payload` };
     }
-    const size = bodySizeOrNull(frame.payload, maxBodyBytes);
+    const size = bodySizeOrNull(frame.payload, maxFrameBytes);
     if (size === null) return { error: `WebSocket frame ${index} has an invalid payload` };
     if (size === -1) return { error: `WebSocket frame ${index} is larger than the configured limit` };
 

@@ -343,6 +343,36 @@ export async function appendWsFrames(stagingEntryId, scenarioId, frames) {
   await transactionDone(transaction);
 }
 
+/** @type {Map<string, Promise<any>>} per-entry save chains */
+const wsSaveQueues = new Map();
+
+/**
+ * Run a WS save after any earlier save for the same entry.
+ *
+ * Two saves for one entry can overlap (a reconnect closing while the previous
+ * connection is still being promoted). Both read the old frame keys and write
+ * replacements, so without serialization the loser can leave metadata and rows
+ * that disagree — replay would then serve a stale frame.
+ *
+ * @template T
+ * @param {string} key
+ * @param {() => Promise<T>} task
+ * @returns {Promise<T>}
+ */
+function enqueueWsSave(key, task) {
+  const previous = wsSaveQueues.get(key) ?? Promise.resolve();
+  const run = previous.then(task, task);
+  // The stored chain must never reject: a failed save's error belongs to its
+  // caller, not to an unhandled rejection or to the next save.
+  const tracked = run
+    .then(() => undefined, () => undefined)
+    .finally(() => {
+      if (wsSaveQueues.get(key) === tracked) wsSaveQueues.delete(key);
+    });
+  wsSaveQueues.set(key, tracked);
+  return run;
+}
+
 /**
  * Persist a finished WebSocket recording.
  *
@@ -360,7 +390,16 @@ export async function saveWsRecording(entry, frames, stagingEntryId) {
     if (stagingEntryId) await deleteWsFrames(stagingEntryId);
     return false;
   }
+  if (!entry?.id) throw new Error('A WebSocket recording needs an entry id.');
+  return enqueueWsSave(entry.id, () => saveWsRecordingNow(entry, frames, stagingEntryId));
+}
 
+/**
+ * @param {object} entry
+ * @param {object[]} frames
+ * @param {string} [stagingEntryId]
+ */
+async function saveWsRecordingNow(entry, frames, stagingEntryId) {
   const database = await openDb();
 
   // Collect the keys to clear first (read transaction), then issue deletes

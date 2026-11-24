@@ -174,3 +174,39 @@ test('socket keys keep identical per-frame connection ids apart', () => {
   assert.equal(socketKey(11, 'ws-1'), socketKey(11, 'ws-1'));
   assert.equal(socketKey(null, 'ws-1'), 'main:ws-1');
 });
+
+test('a direct Socket.IO connection keeps the Engine.IO open packet in the prelude', () => {
+  const plan = planFor([
+    { seq: 0, direction: 'recv', opcode: 1, offsetMs: 0, text: '0{"sid":"abc","pingInterval":25000}' },
+    { seq: 1, direction: 'send', opcode: 1, offsetMs: 10, text: '40' },
+    { seq: 2, direction: 'recv', opcode: 1, offsetMs: 12, text: '40{"sid":"abc"}' },
+  ]);
+  assert.equal(plan.prelude.length, 1);
+  assert.match(plan.prelude[0].text, /^0\{/);
+  assert.equal(plan.steps.length, 1);
+});
+
+test('post-upgrade Socket.IO pushes stay attached to the 5 upgrade step', () => {
+  const plan = planFor([
+    { seq: 0, direction: 'send', opcode: 1, offsetMs: 0, text: '2probe' },
+    { seq: 1, direction: 'recv', opcode: 1, offsetMs: 1, text: '3probe' },
+    { seq: 2, direction: 'send', opcode: 1, offsetMs: 2, text: '5' },
+    { seq: 3, direction: 'recv', opcode: 1, offsetMs: 3, text: '42["push",1]' },
+  ]);
+  const upgrade = plan.steps.find((step) => step.trigger.text === '5');
+  assert.ok(upgrade, 'the upgrade must be a matchable step');
+  assert.equal(upgrade.responses[0].text, '42["push",1]');
+});
+
+test('a rejected SignalR handshake is captured for the synthetic reply', () => {
+  const plan = planFor(
+    [
+      { seq: 0, direction: 'send', opcode: 1, offsetMs: 0, text: '{"protocol":"json","version":1}\u001e' },
+      { seq: 1, direction: 'recv', opcode: 1, offsetMs: 1, text: '{"error":"Requested protocol is not supported"}\u001e' },
+    ],
+    'signalr',
+  );
+  assert.match(plan.handshakeResponse, /not supported/);
+  assert.deepEqual(plan.prelude, []);
+  assert.equal(plan.steps.length, 1);
+});

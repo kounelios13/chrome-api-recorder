@@ -27,6 +27,8 @@ const DELETE_CONFIRM_MS = 5000;
 const STATUS_TIMEOUT_MS = 4000;
 const SAVED_TIMEOUT_MS = 2400;
 const ENTRIES_LIMIT = 200;
+/** Refuse absurd imports before the whole file is parsed into memory. */
+const MAX_IMPORT_FILE_BYTES = 250 * 1024 * 1024;
 const PREVIEW_CHARS = 240;
 const ALL_SITES_PATTERN = '*://*/*';
 
@@ -770,6 +772,14 @@ async function onImportFileSelected(event) {
   if (!file) return;
 
   hideError();
+  if (file.size > MAX_IMPORT_FILE_BYTES) {
+    showError(
+      `That file is ${formatBytes(file.size)}, above the ${formatBytes(
+        MAX_IMPORT_FILE_BYTES,
+      )} import limit. Split it or export fewer scenarios.`,
+    );
+    return;
+  }
   try {
     const text = await file.text();
     let data;

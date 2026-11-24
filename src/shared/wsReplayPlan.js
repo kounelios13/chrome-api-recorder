@@ -92,10 +92,29 @@ export function normalizeFrames(frames, adapter) {
 function isNoise(adapter, message) {
   if (message.direction !== 'recv' || message.text == null) return false;
   if (adapter.isControlOrKeepalive(message.text, 'recv')) return true;
-  // The SignalR handshake reply is synthesized when the client handshake is
-  // answered; replaying the recorded copy as well would duplicate it.
-  if (adapter.name === 'signalr' && message.text.trim() === '{}') return true;
+  // Engine.IO's open packet is a normal server frame on a direct WebSocket
+  // connection; dropping it would leave the client waiting for its handshake.
   return false;
+}
+
+/**
+ * The server's reply to the SignalR protocol handshake, if the recording has
+ * one. It is synthesized (or replayed) when the client handshake arrives, so it
+ * must not also sit in the prelude.
+ *
+ * @param {string} adapterName
+ * @param {ReplayMessage} message
+ */
+function isHandshakeReply(adapterName, message) {
+  if (adapterName !== 'signalr') return false;
+  if (message.direction !== 'recv' || message.text == null) return false;
+  try {
+    const parsed = JSON.parse(message.text);
+    if (!parsed || typeof parsed !== 'object') return false;
+    return parsed.type === undefined && parsed.protocol === undefined;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -112,11 +131,22 @@ function isNoise(adapter, message) {
  *     responses: ReplayMessage[],
  *     startOffsetMs: number,
  *   }>,
+ *   handshakeResponse: string|null,
  * }}
  */
 export function compileReplayPlan({ frames, adapter }) {
   const impl = adapterByName(adapter);
-  const messages = normalizeFrames(frames, impl).filter((message) => !isNoise(impl, message));
+  let handshakeResponse = null;
+  const messages = [];
+
+  for (const message of normalizeFrames(frames, impl)) {
+    if (isNoise(impl, message)) continue;
+    if (!handshakeResponse && isHandshakeReply(impl.name, message)) {
+      handshakeResponse = message.text ?? null;
+      continue;
+    }
+    messages.push(message);
+  }
 
   /** @type {ReplayMessage[]} */
   const prelude = [];
@@ -146,6 +176,7 @@ export function compileReplayPlan({ frames, adapter }) {
     adapter: impl.name,
     prelude,
     steps,
+    handshakeResponse,
   };
 }
 

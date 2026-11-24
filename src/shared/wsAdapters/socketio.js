@@ -158,10 +158,10 @@ const socketio = {
     const packet = parseSocketIoPacket(message);
     if (!packet) return false;
     if (packet.engine === ENGINE_PING || packet.engine === ENGINE_PONG) return true;
-    if (packet.engine === ENGINE_UPGRADE || packet.engine === ENGINE_CLOSE) return true;
-    // The Engine.IO open packet only ever comes from the server during the
-    // HTTP polling phase; if it shows up on the wire it is transport noise.
-    if (packet.engine === ENGINE_OPEN) return direction === 'recv';
+    if (packet.engine === ENGINE_CLOSE) return true;
+    // `0{...}` on a direct WebSocket connection is the server handshake and a
+    // `5` upgrade is a trigger whose recorded pushes must be replayed, so
+    // neither is noise here.
     return false;
   },
 
